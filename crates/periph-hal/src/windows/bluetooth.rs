@@ -291,6 +291,7 @@ pub fn audio_devices() -> Result<Vec<Device>, HardwareError> {
                         transport: "bluetooth.classic".into(),
                         protocol: "windows.device-property".into(),
                     }],
+                    target: String::new(),
                 },
                 connection: device.connection,
                 capabilities,

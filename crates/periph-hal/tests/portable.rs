@@ -24,6 +24,7 @@ fn descriptor() -> DeviceDescriptor {
         identifiers: vec![],
         identities: vec![],
         links: vec![],
+        target: String::new(),
     }
 }
 

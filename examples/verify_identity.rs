@@ -5,7 +5,7 @@
 //!
 //! `--alias <name>` sets a remark on the gamepad record first, mimicking a
 //! user rename, so remark survival is part of the check.
-use periph_in_one::{config::Config, devices, model};
+use periph_in_one::{battery::Batteries, config::Config, devices, hardware, model};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
@@ -26,12 +26,24 @@ fn main() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let readings = devices::scan().expect("扫描失败");
-    let mut devices = model::merge_readings(&config.devices, readings, now);
+    let report = devices::scan().expect("扫描失败");
+    let mut batteries = Batteries::restore(config.batteries.clone());
+    let mut devices = hardware::merge_report(
+        &model::restore(&config.devices),
+        &mut batteries,
+        report,
+        now,
+    );
 
     if !alias_request.is_empty() {
         for device in &mut devices {
-            if device.saved.kind == "gamepad" {
+            if device
+                .saved
+                .descriptor
+                .roles
+                .iter()
+                .any(|role| role == "input.gamepad")
+            {
                 device.saved.alias = alias_request.clone();
             }
         }
@@ -40,6 +52,7 @@ fn main() {
 
     Config {
         devices: devices.iter().map(|d| d.saved.clone()).collect(),
+        batteries: batteries.saved.clone(),
         ..config
     }
     .save(&path)
@@ -48,16 +61,12 @@ fn main() {
     println!("== 记录 {} 条 ==", devices.len());
     for device in &devices {
         println!(
-            "{:<8} alias={:?} uid={:?} serial={:?} pid=0x{:04X} port={:?} present={} battery={:?} msg={}",
-            device.saved.kind,
+            "name={:?} alias={:?} route={:?} connection={:?} battery={:?}",
+            device.saved.descriptor.name,
             device.saved.alias,
-            device.saved.uid,
-            device.saved.serial,
-            device.saved.pid,
-            device.saved.physical_id,
-            device.present,
-            device.saved.battery,
-            device.message,
+            device.saved.descriptor.key,
+            device.connection,
+            batteries.view(&device.saved.id, "main").level
         );
         println!("        id={}", device.saved.id);
     }

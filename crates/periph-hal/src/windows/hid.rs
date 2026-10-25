@@ -91,6 +91,7 @@ fn descriptor(
             transport: format!("{:?}", info.bus_type()).to_lowercase(),
             protocol: "hid".into(),
         }],
+        target: String::new(),
     }
 }
 
@@ -123,14 +124,19 @@ pub fn scan() -> Result<Vec<Device>, HardwareError> {
                 }))
             };
             capabilities.insert("main", battery)?;
+            let mut description = descriptor(
+                info,
+                route,
+                adapter.kind(),
+                outcome.hardware_name,
+                outcome.uid,
+            );
+            description.target = outcome
+                .slot
+                .map(|slot| format!("slot:{slot}"))
+                .unwrap_or_default();
             result.push(Device {
-                descriptor: descriptor(
-                    info,
-                    route,
-                    adapter.kind(),
-                    outcome.hardware_name,
-                    outcome.uid,
-                ),
+                descriptor: description,
                 connection: outcome.connection,
                 capabilities,
                 issue: outcome.issue,

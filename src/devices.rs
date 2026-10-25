@@ -1,19 +1,17 @@
-//! Application-facing compatibility facade. Hardware access lives in periph-hal.
-use crate::{
-    hardware::{self, ScanReport},
-    model::Reading,
-};
-use periph_hal::Hardware;
+//! Application hardware entry points. No legacy reading or platform classifier.
+use crate::hardware::{self, ScanReport};
+use periph_hal::{Hardware, HardwareIdentifier, Link};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct UsbIdentifiers {
-    pub hardware_name: String,
-    pub vid: u16,
-    pub pid: u16,
+pub struct InventoryEntry {
+    pub name: String,
+    pub roles: Vec<String>,
+    pub identifiers: Vec<HardwareIdentifier>,
+    pub links: Vec<Link>,
 }
 
-pub fn enumerate_identifiers() -> Result<Vec<UsbIdentifiers>, String> {
+pub fn enumerate_identifiers() -> Result<Vec<InventoryEntry>, String> {
     let inventory = Hardware::system()
         .map_err(|_| "当前系统没有可用的设备后端".to_string())?
         .inventory();
@@ -23,30 +21,20 @@ pub fn enumerate_identifiers() -> Result<Vec<UsbIdentifiers>, String> {
     Ok(inventory
         .devices
         .into_iter()
-        .map(|descriptor| {
-            let id = descriptor.identifiers.first();
-            UsbIdentifiers {
-                hardware_name: descriptor.name,
-                vid: id.map_or(0, |id| id.vendor),
-                pid: id.map_or(0, |id| id.product),
-            }
+        .map(|descriptor| InventoryEntry {
+            name: descriptor.name,
+            roles: descriptor.roles,
+            identifiers: descriptor.identifiers,
+            links: descriptor.links,
         })
         .collect())
 }
 
-pub fn scan_report() -> Result<ScanReport, String> {
-    let snapshot = Hardware::system()
-        .map_err(|_| "当前系统没有可用的设备后端".to_string())?
-        .scan();
-    Ok(hardware::from_snapshot(snapshot))
+pub fn refresh(hardware: &mut Hardware) -> ScanReport {
+    hardware::from_snapshot(hardware.scan())
 }
 
-/// Legacy callers have no way to handle partial coverage, so fail explicitly.
-/// The application uses scan_report and preserves failed-source history.
-pub fn scan() -> Result<Vec<Reading>, String> {
-    let report = scan_report()?;
-    if !report.failures.is_empty() {
-        return Err("暂时无法读取完整设备状态，请稍后刷新".into());
-    }
-    Ok(report.readings)
+pub fn scan() -> Result<ScanReport, String> {
+    let mut hardware = Hardware::system().map_err(|_| "当前系统没有可用的设备后端".to_string())?;
+    Ok(refresh(&mut hardware))
 }

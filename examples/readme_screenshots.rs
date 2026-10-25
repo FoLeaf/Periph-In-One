@@ -51,8 +51,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         |(title, kind, hardware, usb, percentage, level, fresh, updated)| DeviceRow {
             title: title.into(),
             kind: kind.into(),
+            category: match kind {
+                "mouse" => "鼠标 · USB",
+                "keyboard" => "键盘 · USB",
+                _ => "手柄 · USB",
+            }
+            .into(),
             hardware_name: hardware.into(),
-            usb_id: format!("VID: 0x{} · PID: 0x{}", &usb[..4], &usb[5..]).into(),
+            hardware_id: format!("VID: 0x{} · PID: 0x{}", &usb[..4], &usb[5..]).into(),
             percentage: percentage.into(),
             level,
             has_battery: fresh && level > 0.0,
@@ -70,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_updated("14:32 更新 · 示例数据".into());
     ui.set_editing_name("NK mouse NANO dongle".into());
     ui.set_editing_serial("接收器序列号：未提供".into());
-    ui.set_editing_usb_id("VID: 0x373B · PID: 0x1216".into());
+    ui.set_editing_hardware_id("VID: 0x373B · PID: 0x1216".into());
     ui.set_editing_alias("办公鼠标".into());
     ui.set_editing_has_name(true);
     ui.window().set_size(slint::LogicalSize::new(740.0, 620.0));

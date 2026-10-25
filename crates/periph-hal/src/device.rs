@@ -1,13 +1,15 @@
 use crate::{Capabilities, HardwareError};
 
 /// An access route, not a permanent identity or an application record ID.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceKey {
     pub backend: String,
     pub local: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Connection {
     Connected,
     Disconnected,
@@ -18,6 +20,7 @@ pub enum Connection {
 /// The namespace matters: USB vendor numbers and Bluetooth company numbers
 /// are different registries even when the numeric values happen to match.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HardwareIdentifier {
     pub namespace: String,
     pub vendor: u16,
@@ -25,6 +28,7 @@ pub struct HardwareIdentifier {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum IdentityKind {
     UnitId,
@@ -34,6 +38,7 @@ pub enum IdentityKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Identity {
     pub namespace: String,
     pub kind: IdentityKind,
@@ -43,12 +48,14 @@ pub struct Identity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Link {
     pub transport: String,
     pub protocol: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceDescriptor {
     pub key: DeviceKey,
     pub name: String,
@@ -57,6 +64,10 @@ pub struct DeviceDescriptor {
     pub identifiers: Vec<HardwareIdentifier>,
     pub identities: Vec<Identity>,
     pub links: Vec<Link>,
+    /// Stable logical target within a shared endpoint (e.g. a receiver slot).
+    /// Qualifies identities whose subject is an enclosing device/receiver.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub target: String,
 }
 
 #[derive(Clone, Debug)]

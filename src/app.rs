@@ -1,10 +1,12 @@
 use crate::{AppWindow, DeviceRow, platform};
 use chrono::{DateTime, Local};
 use periph_in_one::{
+    battery::Batteries,
     config::Config,
     devices,
     hardware::{self, ScanReport},
     model::{self, Device},
+    presentation,
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
@@ -67,6 +69,7 @@ struct App {
     config: Config,
     config_error: Option<String>,
     devices: Vec<Device>,
+    batteries: Batteries,
     worker: Sender<WorkerCommand>,
     saver: Sender<SaveRequest>,
     save_revision: u64,
@@ -96,26 +99,12 @@ fn timestamp(time: u64) -> String {
 }
 
 fn fallback_name(device: &Device) -> &str {
-    if !device.saved.alias.is_empty() {
-        &device.saved.alias
-    } else if !device.saved.hardware_name.is_empty() {
-        &device.saved.hardware_name
-    } else if device.saved.kind == "mouse" {
-        "无线鼠标"
-    } else if device.saved.kind == "keyboard" {
-        "无线键盘"
-    } else if device.saved.kind == "gamepad" {
-        "无线手柄"
-    } else if device.saved.kind == "bt-headset" {
-        "蓝牙耳机"
-    } else {
-        "无线耳机"
-    }
+    presentation::title(device)
 }
 
 fn identity_note(device: &Device) -> &'static str {
     if device.saved.identity_conflict {
-        "此序列号不能唯一识别设备"
+        "此身份信息不能唯一识别设备"
     } else {
         ""
     }
@@ -129,9 +118,9 @@ impl App {
             &*message,
             "备注已保存"
                 | "备注已重新绑定"
-                | "接收器序列号已复制"
+                | "序列号已复制"
                 | "硬件名称已复制"
-                | "VID/PID 已复制"
+                | "硬件标识已复制"
                 | "离线记录已删除"
                 | "已启用开机自启"
                 | "已关闭开机自启"
@@ -152,6 +141,7 @@ impl App {
             return false;
         }
         self.config.devices = self.devices.iter().map(|d| d.saved.clone()).collect();
+        self.config.batteries = self.batteries.saved.clone();
         self.save_revision += 1;
         if !success.is_empty() {
             self.save_notice = success.into();
@@ -193,47 +183,37 @@ impl App {
             .into_iter()
             .map(|device| {
                 let saved = &device.saved;
+                let battery = self.batteries.view(&saved.id, "main");
                 DeviceRow {
                     id: saved.id.clone().into(),
                     title: fallback_name(device).into(),
-                    hardware_name: saved.hardware_name.clone().into(),
-                    serial: if saved.serial.is_empty() {
-                        "接收器序列号：未提供".into()
-                    } else {
-                        format!("接收器 SN：{}", saved.serial).into()
-                    },
-                    usb_id: model::usb_id_label(saved.vid, saved.pid).into(),
-                    kind: saved.kind.clone().into(),
-                    percentage: saved
-                        .battery
+                    hardware_name: saved.descriptor.name.clone().into(),
+                    serial: presentation::serial_label(&saved.descriptor).into(),
+                    hardware_id: presentation::identifiers(&saved.descriptor).into(),
+                    kind: presentation::icon(&saved.descriptor).into(),
+                    category: presentation::category(&saved.descriptor).into(),
+                    percentage: battery
+                        .level
                         .map(|b| format!("{b}%"))
                         .unwrap_or("—".into())
                         .into(),
-                    level: saved.battery.unwrap_or(0).min(100) as f32 / 100.0,
+                    level: battery.level.unwrap_or(0) as f32 / 100.0,
                     fresh: device.connection == periph_hal::Connection::Connected,
-                    has_battery: device.fresh && saved.battery.is_some(),
+                    has_battery: battery.current && battery.level.is_some(),
                     present: device.present,
-                    status: if device.connection == periph_hal::Connection::Connected {
-                        "已连接".into()
-                    } else if device.connection == periph_hal::Connection::Disconnected {
-                        "已离线".into()
-                    } else if !device.present {
-                        "状态未知".into()
-                    } else {
-                        "未响应".into()
-                    },
-                    updated: match saved.last_success {
-                        Some(_) if device.fresh && device.system_cached => "系统读数".into(),
+                    status: presentation::status(device).into(),
+                    updated: match battery.observed_at {
+                        Some(_) if battery.current && battery.system_cached => "系统读数".into(),
                         Some(time) => format!(
                             "{} {}",
-                            if device.fresh {
+                            if battery.current {
                                 "更新于"
                             } else {
                                 "上次读数"
                             },
                             timestamp(time)
                         ),
-                        None => device.message.clone(),
+                        None => presentation::battery_message(&battery).into(),
                     }
                     .into(),
                     alias: saved.alias.clone().into(),
@@ -268,16 +248,13 @@ impl App {
                 .devices
                 .iter()
                 .map(|d| {
-                    let level = d
-                        .saved
-                        .battery
-                        .map(|b| format!("{b}%"))
-                        .unwrap_or("—".into());
-                    let note = if !d.fresh && d.saved.battery.is_some() {
+                    let battery = self.batteries.view(&d.saved.id, "main");
+                    let level = battery.level.map(|b| format!("{b}%")).unwrap_or("—".into());
+                    let note = if !battery.current && battery.level.is_some() {
                         "（上次读数）"
-                    } else if d.no_battery {
+                    } else if battery.unsupported {
                         "（不提供电量）"
-                    } else if d.saved.battery.is_none() {
+                    } else if battery.available && battery.level.is_none() {
                         "（电量暂不可用）"
                     } else {
                         ""
@@ -325,8 +302,13 @@ impl App {
                 self.ui.set_busy(false);
                 match result {
                     Ok(report) => {
-                        let partial = !report.failures.is_empty();
-                        self.devices = hardware::merge_report(&self.devices, report, now());
+                        let partial = !report.snapshot.failures.is_empty();
+                        self.devices = hardware::merge_report(
+                            &self.devices,
+                            &mut self.batteries,
+                            report,
+                            now(),
+                        );
                         self.ui.set_updated(
                             format!("上次刷新 {}", Local::now().format("%H:%M:%S")).into(),
                         );
@@ -337,9 +319,11 @@ impl App {
                     }
                     Err(error) => {
                         for device in &mut self.devices {
-                            device.fresh = false;
                             device.connection = periph_hal::Connection::Unknown;
-                            device.message = error.clone();
+                            device.issue = Some(periph_hal::HardwareError::new(
+                                periph_hal::ErrorKind::Unavailable,
+                                error.clone(),
+                            ));
                         }
                         self.notice(error);
                     }
@@ -383,23 +367,21 @@ impl App {
             Action::Edit(id) => {
                 if let Some(device) = self.devices.iter().find(|d| d.saved.id == id) {
                     self.ui.set_editing_id(id.clone().into());
-                    self.ui.set_editing_usb_id(
-                        model::usb_id_label(device.saved.vid, device.saved.pid).into(),
+                    self.ui.set_editing_hardware_id(
+                        presentation::identifiers(&device.saved.descriptor).into(),
                     );
                     self.ui.set_editing_name(
-                        format!("硬件名称：{}", device.saved.hardware_name).into(),
+                        format!("硬件名称：{}", device.saved.descriptor.name).into(),
                     );
                     self.ui
-                        .set_editing_has_name(!device.saved.hardware_name.is_empty());
-                    self.ui
-                        .set_editing_has_serial(!device.saved.serial.is_empty());
+                        .set_editing_has_name(!device.saved.descriptor.name.is_empty());
+                    self.ui.set_editing_has_serial(
+                        presentation::serial(&device.saved.descriptor).is_some(),
+                    );
                     self.ui.set_editing_alias(device.saved.alias.clone().into());
-                    self.ui
-                        .set_editing_serial(if device.saved.serial.is_empty() {
-                            "接收器序列号：未提供".into()
-                        } else {
-                            format!("接收器序列号：{}", device.saved.serial).into()
-                        });
+                    self.ui.set_editing_serial(
+                        presentation::serial_label(&device.saved.descriptor).into(),
+                    );
                     self.ui.set_editing_identity(identity_note(device).into());
                     self.rebind_ids.clear();
                     let mut names = Vec::<slint::SharedString>::new();
@@ -411,7 +393,7 @@ impl App {
                         {
                             self.rebind_ids.push(other.saved.id.clone());
                             names.push(
-                                format!("{} · {}", other.saved.alias, other.saved.hardware_name)
+                                format!("{} · {}", other.saved.alias, other.saved.descriptor.name)
                                     .into(),
                             );
                         }
@@ -453,23 +435,23 @@ impl App {
             }
             Action::Copy(id) => {
                 if let Some(device) = self.devices.iter().find(|d| d.saved.id == id) {
-                    if device.saved.serial.is_empty() {
+                    let Some(serial) = presentation::serial(&device.saved.descriptor) else {
                         self.notice("设备未提供序列号");
                         return;
-                    }
-                    match platform::copy_text(&device.saved.serial) {
-                        Ok(()) => self.notice("接收器序列号已复制"),
+                    };
+                    match platform::copy_text(&serial.value) {
+                        Ok(()) => self.notice("序列号已复制"),
                         Err(error) => self.notice(error),
                     }
                 }
             }
             Action::CopyName(id) => {
                 if let Some(device) = self.devices.iter().find(|d| d.saved.id == id) {
-                    if device.saved.hardware_name.is_empty() {
+                    if device.saved.descriptor.name.is_empty() {
                         self.notice("设备未提供硬件名称");
                         return;
                     }
-                    match platform::copy_text(&device.saved.hardware_name) {
+                    match platform::copy_text(&device.saved.descriptor.name) {
                         Ok(()) => self.notice("硬件名称已复制"),
                         Err(error) => self.notice(error),
                     }
@@ -477,23 +459,24 @@ impl App {
             }
             Action::CopyIds(id) => {
                 if let Some(device) = self.devices.iter().find(|d| d.saved.id == id) {
-                    match platform::copy_text(&model::usb_id_label(
-                        device.saved.vid,
-                        device.saved.pid,
-                    )) {
-                        Ok(()) => self.notice("VID/PID 已复制"),
+                    match platform::copy_text(&presentation::identifiers(&device.saved.descriptor))
+                    {
+                        Ok(()) => self.notice("硬件标识已复制"),
                         Err(error) => self.notice(error),
                     }
                 }
             }
             Action::Delete(id) => {
                 let previous = self.devices.clone();
+                let previous_batteries = self.batteries.clone();
                 match model::remove_offline(&mut self.devices, &id) {
                     Ok(()) => {
+                        self.batteries.remove(&id);
                         if self.persist("离线记录已删除") {
                             self.ui.set_deleting(false);
                         } else {
                             self.devices = previous;
+                            self.batteries = previous_batteries;
                         }
                         self.update();
                     }
@@ -599,18 +582,21 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     }
     if arguments.iter().any(|a| a == "--once") {
-        let readings = devices::scan()?;
-        // Explicit diagnostic mode prints battery and name, never serials.
-        for reading in readings {
-            println!(
-                "{}: {} ({})",
-                reading.hardware_name,
-                reading
-                    .battery
-                    .map(|b| format!("{b}%"))
-                    .unwrap_or("—".into()),
-                reading.message
-            );
+        let report = devices::scan()?;
+        let mut batteries = Batteries::default();
+        let devices = hardware::merge_report(&[], &mut batteries, report, now());
+        for device in devices {
+            let battery = batteries.view(&device.saved.id, "main");
+            let level = battery
+                .level
+                .map(|level| format!("{level}%"))
+                .unwrap_or("—".into());
+            let note = if battery.unsupported {
+                presentation::battery_message(&battery)
+            } else {
+                presentation::status(&device)
+            };
+            println!("{}: {} ({})", fallback_name(&device), level, note);
         }
         return Ok(());
     }
@@ -639,7 +625,8 @@ pub fn run() -> Result<(), String> {
     };
     ui.window()
         .set_size(slint::LogicalSize::new(config.width, config.height));
-    let initial = model::merge_readings(&config.devices, vec![], now());
+    let initial = model::restore(&config.devices);
+    let batteries = Batteries::restore(config.batteries.clone());
     let tray = tray_icon()?;
     let (sender, receiver) = mpsc::channel();
     let (saver, saves) = mpsc::channel::<SaveRequest>();
@@ -663,6 +650,7 @@ pub fn run() -> Result<(), String> {
         config,
         config_error,
         devices: initial,
+        batteries,
         worker: sender.clone(),
         saver,
         save_revision: 0,
@@ -684,7 +672,7 @@ pub fn run() -> Result<(), String> {
     });
     ui.on_copy_serial(|id| post(Action::Copy(id.into())));
     ui.on_copy_name(|id| post(Action::CopyName(id.into())));
-    ui.on_copy_usb_id(|id| post(Action::CopyIds(id.into())));
+    ui.on_copy_hardware_id(|id| post(Action::CopyIds(id.into())));
     ui.on_delete_device(|id| post(Action::Delete(id.into())));
     ui.on_toggle_autostart(|enabled| post(Action::Autostart(enabled)));
     ui.window().on_close_requested(|| {
@@ -708,7 +696,7 @@ pub fn run() -> Result<(), String> {
         .spawn(move || {
             loop {
                 post(Action::ReadingStarted);
-                post(Action::Readings(devices::scan_report()));
+                post(Action::Readings(devices::scan()));
                 match receiver.recv_timeout(Duration::from_secs(60)) {
                     Ok(WorkerCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
                     Ok(WorkerCommand::Refresh) | Err(RecvTimeoutError::Timeout) => {}

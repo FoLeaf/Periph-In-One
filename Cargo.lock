@@ -3593,6 +3593,7 @@ name = "periph-hal"
 version = "0.1.0"
 dependencies = [
  "hidapi",
+ "serde",
  "windows-sys 0.61.2",
 ]
 

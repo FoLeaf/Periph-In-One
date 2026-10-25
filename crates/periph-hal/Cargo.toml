@@ -10,6 +10,10 @@ publish = false
 default = []
 windows-backend = ["dep:hidapi", "dep:windows-sys"]
 diagnostics = ["windows-backend"]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"], optional = true }

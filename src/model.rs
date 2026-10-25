@@ -1,287 +1,358 @@
-use periph_hal::Connection;
+//! Device records and identity reconciliation. No battery state or platform rules.
+use periph_hal::{
+    Connection, DeviceDescriptor, DeviceKey, HardwareError, Identity, IdentityKind, Snapshot,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedDevice {
+    /// Opaque persistent record ID; old IDs are preserved during migration.
     pub id: String,
-    pub physical_id: String,
-    pub kind: String,
-    pub hardware_name: String,
-    pub serial: String,
-    pub uid: String,
-    pub vid: u16,
-    pub pid: u16,
+    pub descriptor: DeviceDescriptor,
+    pub routes: Vec<DeviceKey>,
     pub alias: String,
-    pub battery: Option<u8>,
-    pub last_success: Option<u64>,
     pub identity_conflict: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct Reading {
-    pub physical_id: String,
-    pub kind: String,
-    pub hardware_name: String,
-    pub serial: String,
-    pub uid: String,
-    pub vid: u16,
-    pub pid: u16,
-    pub battery: Option<u8>,
-    /// A verified model provides no battery reading. Connection is independent
-    /// and this flag never makes a historical battery value fresh.
-    pub no_battery: bool,
-    pub connection: Connection,
-    pub system_cached: bool,
-    pub message: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct Device {
     pub saved: SavedDevice,
     pub present: bool,
-    pub fresh: bool,
     pub connection: Connection,
-    pub no_battery: bool,
-    pub system_cached: bool,
-    pub message: String,
+    pub issue: Option<HardwareError>,
 }
 
-pub fn serial_key(vid: u16, pid: u16, serial: &str) -> String {
-    // JSON tuple avoids ambiguous concatenations, and does not normalize case.
-    format!("sn:{}", serde_json::to_string(&(vid, pid, serial)).unwrap())
+#[derive(Debug)]
+pub struct MergeResult {
+    pub devices: Vec<Device>,
+    pub bindings: BTreeMap<DeviceKey, String>,
+    /// Confirmed duplicate records; domains rebind their own history separately.
+    pub merged_ids: Vec<(String, String)>,
 }
 
-/// The protocol-reported per-unit identity. The pid is deliberately absent:
-/// vendors reuse one uid across firmware personalities whose pid differs.
-pub fn uid_key(vid: u16, uid: &str) -> String {
-    format!("uid:{}", serde_json::to_string(&(vid, uid)).unwrap())
-}
-
-pub fn usb_id_label(vid: u16, pid: u16) -> String {
-    format!("VID: 0x{vid:04X} · PID: 0x{pid:04X}")
-}
-
-fn name_used_as_serial(serial: &str, name: &str) -> bool {
-    !serial.is_empty() && serial.trim().eq_ignore_ascii_case(name.trim())
-}
-
-fn saved_physical_id(saved: &SavedDevice) -> Option<String> {
-    if !saved.physical_id.is_empty() {
-        return Some(saved.physical_id.clone());
-    }
-    // Migrate v0.1.2 local:[vid,pid,"pid-nanoseconds:epoch:ContainerId"].
-    // Read the tuple rather than matching names/VID/PID alone; separate
-    // receivers of the same model must never collapse into one record.
-    let (vid, pid, physical): (u16, u16, String) =
-        serde_json::from_str(saved.id.strip_prefix("local:")?).ok()?;
-    if (vid, pid) != (saved.vid, saved.pid) {
-        return None;
-    }
-    if let Some((session, tail)) = physical.split_once(':')
-        && session.split_once('-').is_some_and(|(pid, time)| {
-            !pid.is_empty()
-                && !time.is_empty()
-                && pid.bytes().all(|c| c.is_ascii_digit())
-                && time.bytes().all(|c| c.is_ascii_digit())
-        })
-        && let Some((epoch, identity)) = tail.split_once(':')
-        && !epoch.is_empty()
-        && epoch.bytes().all(|c| c.is_ascii_digit())
-    {
-        return Some(identity.into());
-    }
-    Some(physical)
-}
-
-fn reconcile_record(devices: &mut Vec<Device>, reading: &Reading, id: &str) -> usize {
-    let candidates: Vec<_> = devices
-        .iter()
-        .enumerate()
-        .filter_map(|(i, device)| {
-            let saved = &device.saved;
-            (saved.id == id
-                || (!device.present
-                    && saved.vid == reading.vid
-                    && saved_physical_id(saved).as_deref() == Some(reading.physical_id.as_str())
-                    // One port holds one device at a time, so the port anchors
-                    // cross-personality merges; uid and serial must never
-                    // contradict it.
-                    && (saved.uid.is_empty()
-                        || reading.uid.is_empty()
-                        || saved.uid == reading.uid)
-                    && (saved.serial.is_empty()
-                        || reading.serial.is_empty()
-                        || saved.serial == reading.serial
-                        || name_used_as_serial(&saved.serial, &saved.hardware_name))))
-            .then_some(i)
-        })
-        .collect();
-    let Some(index) = candidates
-        .iter()
-        .copied()
-        .max_by_key(|&i| (devices[i].saved.id == id, devices[i].saved.last_success))
-    else {
-        devices.push(Device {
-            saved: SavedDevice {
-                id: id.into(),
-                ..Default::default()
-            },
-            present: false,
-            fresh: false,
-            connection: Connection::Disconnected,
-            no_battery: false,
-            system_cached: false,
-            message: String::new(),
-        });
-        return devices.len() - 1;
-    };
-    let mut merged = devices[index].clone();
-    // A local id is the weakest identity: a topology-only reading must never
-    // downgrade a uid- or serial-keyed record.
-    if merged.saved.id.starts_with("local:") || !id.starts_with("local:") {
-        merged.saved.id = id.into();
-    }
-    if merged.saved.alias.is_empty()
-        && let Some(source) = candidates
-            .iter()
-            .copied()
-            .filter(|&i| !devices[i].saved.alias.is_empty())
-            .max_by_key(|&i| devices[i].saved.last_success)
-    {
-        merged.saved.alias = devices[source].saved.alias.clone();
-    }
-    let mut remove = Vec::new();
-    for i in candidates {
-        let saved = &devices[i].saved;
-        // Preserve a distinct user remark for explicit review/rebinding.
-        if !saved.alias.is_empty() && saved.alias != merged.saved.alias {
-            continue;
-        }
-        if saved.last_success > merged.saved.last_success {
-            merged.saved.last_success = saved.last_success;
-            merged.saved.battery = saved.battery;
-        }
-        remove.push(i);
-    }
-    for i in remove.into_iter().rev() {
-        devices.remove(i);
-    }
-    devices.push(merged);
-    devices.len() - 1
-}
-
-pub fn merge_readings(saved: &[SavedDevice], readings: Vec<Reading>, now: u64) -> Vec<Device> {
-    let mut devices: Vec<Device> = saved
+pub fn restore(saved: &[SavedDevice]) -> Vec<Device> {
+    saved
         .iter()
         .cloned()
         .map(|saved| Device {
             saved,
             present: false,
-            fresh: false,
             connection: Connection::Disconnected,
-            no_battery: false,
-            system_cached: false,
-            message: "设备已离线".into(),
+            issue: None,
+        })
+        .collect()
+}
+
+fn serial_is_name(identity: &Identity, descriptor: &DeviceDescriptor) -> bool {
+    identity.kind == IdentityKind::Serial
+        && identity
+            .value
+            .trim()
+            .eq_ignore_ascii_case(descriptor.name.trim())
+}
+
+fn claim_key(identity: &Identity, target: &str) -> String {
+    let scope = if identity.subject == "device" {
+        ""
+    } else {
+        target
+    };
+    format!(
+        "identity:{}",
+        serde_json::to_string(&(
+            &identity.namespace,
+            &identity.subject,
+            scope,
+            identity.kind,
+            &identity.value
+        ))
+        .unwrap()
+    )
+}
+
+fn strong(identity: &Identity) -> bool {
+    matches!(
+        identity.kind,
+        IdentityKind::UnitId | IdentityKind::Serial | IdentityKind::Address
+    )
+}
+
+fn contradictory(a: &DeviceDescriptor, b: &DeviceDescriptor) -> bool {
+    a.identities
+        .iter()
+        .filter(|identity| {
+            strong(identity) && !identity.value.is_empty() && !serial_is_name(identity, a)
+        })
+        .any(|left| {
+            b.identities.iter().any(|right| {
+                strong(right)
+                    && !right.value.is_empty()
+                    && !serial_is_name(right, b)
+                    && left.kind == right.kind
+                    && left.namespace == right.namespace
+                    && left.subject == right.subject
+                    && left.value != right.value
+            })
+        })
+}
+
+fn rank(kind: IdentityKind) -> u8 {
+    match kind {
+        IdentityKind::UnitId => 4,
+        IdentityKind::Address => 3,
+        IdentityKind::Serial => 2,
+        IdentityKind::Location => 1,
+        _ => 0,
+    }
+}
+
+fn usable_claims(
+    descriptor: &DeviceDescriptor,
+    serial_conflict: bool,
+) -> impl Iterator<Item = (&Identity, String)> {
+    descriptor
+        .identities
+        .iter()
+        .filter(move |identity| {
+            !identity.value.is_empty()
+                && !(identity.kind == IdentityKind::Serial
+                    && (serial_conflict || serial_is_name(identity, descriptor)))
+        })
+        .map(|identity| (identity, claim_key(identity, &descriptor.target)))
+}
+
+fn routes(saved: &SavedDevice) -> impl Iterator<Item = &DeviceKey> {
+    saved
+        .routes
+        .iter()
+        .chain(std::iter::once(&saved.descriptor.key))
+}
+
+/// Reconcile facts from completed sources only. A missing/failed source leaves
+/// its known devices unknown; it cannot authoritatively declare them offline.
+pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
+    let completed: HashSet<_> = snapshot.completed.iter().map(String::as_str).collect();
+    let mut devices: Vec<_> = previous
+        .iter()
+        .map(|old| {
+            let covered =
+                routes(&old.saved).all(|route| completed.contains(route.backend.as_str()));
+            Device {
+                saved: old.saved.clone(),
+                present: if covered { false } else { old.present },
+                connection: if covered {
+                    Connection::Disconnected
+                } else {
+                    Connection::Unknown
+                },
+                issue: snapshot
+                    .failures
+                    .iter()
+                    .find(|failure| {
+                        routes(&old.saved).any(|route| route.backend == failure.backend)
+                    })
+                    .map(|failure| failure.error.clone()),
+            }
         })
         .collect();
-    let mut counts = HashMap::<String, usize>::new();
-    let mut physical = HashSet::new();
-    let readings: Vec<_> = readings
-        .into_iter()
-        .filter(|r| physical.insert((r.vid, r.pid, r.physical_id.clone())))
-        .collect();
-    for reading in &readings {
-        if !reading.serial.is_empty() {
-            *counts
-                .entry(serial_key(reading.vid, reading.pid, &reading.serial))
-                .or_default() += 1;
+    let mut serial_counts = HashMap::<String, HashSet<String>>::new();
+    for observation in &snapshot.devices {
+        for identity in
+            observation.descriptor.identities.iter().filter(|identity| {
+                identity.kind == IdentityKind::Serial && !identity.value.is_empty()
+            })
+        {
+            serial_counts
+                .entry(claim_key(identity, &observation.descriptor.target))
+                .or_default()
+                .insert(
+                    observation
+                        .descriptor
+                        .identities
+                        .iter()
+                        .find(|claim| {
+                            matches!(claim.kind, IdentityKind::UnitId | IdentityKind::Address)
+                                && !claim.value.is_empty()
+                        })
+                        .map(|claim| claim_key(claim, &observation.descriptor.target))
+                        .unwrap_or_else(|| {
+                            serde_json::to_string(&observation.descriptor.key).unwrap()
+                        }),
+                );
         }
     }
-    // A serial collision is remembered: a later scan with only one receiver
-    // must not silently attach a historical remark to the wrong receiver.
+    let collisions: HashSet<_> = serial_counts
+        .into_iter()
+        .filter(|(_, keys)| keys.len() > 1)
+        .map(|(key, _)| key)
+        .collect();
     for device in &mut devices {
-        if name_used_as_serial(&device.saved.serial, &device.saved.hardware_name)
-            || counts
-                .get(&serial_key(
-                    device.saved.vid,
-                    device.saved.pid,
-                    &device.saved.serial,
-                ))
-                .is_some_and(|n| *n > 1)
-        {
+        if device.saved.descriptor.identities.iter().any(|identity| {
+            identity.kind == IdentityKind::Serial
+                && (serial_is_name(identity, &device.saved.descriptor)
+                    || collisions.contains(&claim_key(identity, &device.saved.descriptor.target)))
+        }) {
             device.saved.identity_conflict = true;
         }
     }
-    for reading in readings {
-        let serial_id = serial_key(reading.vid, reading.pid, &reading.serial);
-        let conflict = name_used_as_serial(&reading.serial, &reading.hardware_name)
-            || counts.get(&serial_id).is_some_and(|n| *n > 1)
-            || devices.iter().any(|d| {
-                d.saved.vid == reading.vid
-                    && d.saved.pid == reading.pid
-                    && d.saved.serial == reading.serial
-                    && d.saved.identity_conflict
+    let mut bindings = BTreeMap::new();
+    let mut merged_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for observation in &snapshot.devices {
+        let descriptor = &observation.descriptor;
+        if !seen.insert(descriptor.key.clone()) {
+            continue;
+        }
+        let conflict = descriptor
+            .identities
+            .iter()
+            .filter(|identity| identity.kind == IdentityKind::Serial)
+            .any(|identity| {
+                serial_is_name(identity, descriptor)
+                    || collisions.contains(&claim_key(identity, &descriptor.target))
+                    || devices.iter().any(|device| {
+                        device.saved.identity_conflict
+                            && usable_claims(&device.saved.descriptor, false)
+                                .any(|(_, key)| key == claim_key(identity, &descriptor.target))
+                    })
             });
-        let retained_serial = if reading.serial.is_empty() {
-            devices
+        let incoming: Vec<_> = usable_claims(descriptor, conflict).collect();
+        let mut candidates: Vec<_> = devices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, device)| {
+                if contradictory(&device.saved.descriptor, descriptor) {
+                    return None;
+                }
+                let matched =
+                    usable_claims(&device.saved.descriptor, device.saved.identity_conflict)
+                        .any(|(_, key)| incoming.iter().any(|(_, incoming)| *incoming == key));
+                (matched || routes(&device.saved).any(|key| key == &descriptor.key))
+                    .then_some(index)
+            })
+            .collect();
+        let index = if candidates.is_empty() {
+            let mut id = incoming
                 .iter()
-                .find(|d| {
-                    !d.present
-                        && !d.saved.identity_conflict
-                        && !d.saved.serial.is_empty()
-                        && (d.saved.vid, d.saved.pid) == (reading.vid, reading.pid)
-                        && saved_physical_id(&d.saved).as_deref() == Some(&reading.physical_id)
-                })
-                .map(|d| d.saved.serial.clone())
+                .max_by_key(|(identity, _)| rank(identity.kind))
+                .map(|(_, key)| key.clone())
+                .unwrap_or_else(|| {
+                    format!("route:{}", serde_json::to_string(&descriptor.key).unwrap())
+                });
+            if devices.iter().any(|device| device.saved.id == id) {
+                id.push_str(&format!(
+                    "|route:{}",
+                    serde_json::to_string(&descriptor.key).unwrap()
+                ));
+            }
+            devices.push(Device {
+                saved: SavedDevice {
+                    id,
+                    descriptor: descriptor.clone(),
+                    ..SavedDevice::default()
+                },
+                present: false,
+                connection: Connection::Disconnected,
+                issue: None,
+            });
+            devices.len() - 1
         } else {
-            None
+            candidates.sort_by_key(|&index| {
+                (
+                    !routes(&devices[index].saved).any(|key| key == &descriptor.key),
+                    devices[index].saved.alias.is_empty(),
+                    index,
+                )
+            });
+            let index = candidates[0];
+            let alias = candidates
+                .iter()
+                .map(|&i| &devices[i].saved.alias)
+                .find(|alias| !alias.is_empty())
+                .cloned()
+                .unwrap_or_default();
+            if devices[index].saved.alias.is_empty() {
+                devices[index].saved.alias = alias;
+            }
+            let mut remove = Vec::new();
+            for &other in &candidates[1..] {
+                if !devices[other].saved.alias.is_empty()
+                    && devices[other].saved.alias != devices[index].saved.alias
+                {
+                    continue;
+                }
+                merged_ids.push((
+                    devices[other].saved.id.clone(),
+                    devices[index].saved.id.clone(),
+                ));
+                let old_routes = devices[other].saved.routes.clone();
+                devices[index].saved.routes.extend(old_routes);
+                remove.push(other);
+            }
+            let removed_before = remove.iter().filter(|&&other| other < index).count();
+            remove.sort_unstable();
+            for other in remove.into_iter().rev() {
+                devices.remove(other);
+            }
+            index - removed_before
         };
-        let id = if !reading.uid.is_empty() {
-            uid_key(reading.vid, &reading.uid)
-        } else if let Some(serial) = &retained_serial {
-            serial_key(reading.vid, reading.pid, serial)
-        } else if reading.serial.is_empty() || conflict {
-            format!(
-                "local:{}",
-                serde_json::to_string(&(reading.vid, &reading.physical_id)).unwrap()
-            )
-        } else {
-            serial_id
-        };
-        let index = reconcile_record(&mut devices, &reading, &id);
         let device = &mut devices[index];
-        device.saved.physical_id = reading.physical_id;
-        device.saved.kind = reading.kind;
-        if !reading.hardware_name.is_empty() {
-            device.saved.hardware_name = reading.hardware_name;
+        let already_seen = bindings.values().any(|id| id == &device.saved.id);
+        if !already_seen {
+            device
+                .saved
+                .routes
+                .retain(|route| !completed.contains(route.backend.as_str()));
         }
-        device.saved.serial = retained_serial.unwrap_or(reading.serial);
-        if !reading.uid.is_empty() {
-            device.saved.uid = reading.uid.clone();
+        if !device.saved.routes.contains(&descriptor.key) {
+            device.saved.routes.push(descriptor.key.clone());
         }
-        device.saved.vid = reading.vid;
-        device.saved.pid = reading.pid;
+        let mut updated = descriptor.clone();
+        // Temporarily missing strong evidence must not downgrade identity.
+        for identity in &device.saved.descriptor.identities {
+            if strong(identity) && !updated.identities.contains(identity) {
+                updated.identities.push(identity.clone());
+            }
+        }
+        if updated.name.is_empty() {
+            updated.name = device.saved.descriptor.name.clone();
+        }
+        device.saved.descriptor = updated;
         device.saved.identity_conflict |= conflict;
-        device.present = true;
-        device.connection = reading.connection;
-        device.no_battery = reading.no_battery;
-        device.system_cached = reading.system_cached;
-        device.fresh = reading.battery.is_some_and(|level| level <= 100);
-        device.message = reading.message;
-        if let Some(battery) = reading.battery.filter(|b| *b <= 100) {
-            device.saved.battery = Some(battery);
-            device.saved.last_success = Some(now);
+        device.present |= observation.connection != Connection::Disconnected;
+        device.connection = if already_seen && device.connection == Connection::Connected {
+            Connection::Connected
+        } else {
+            observation.connection
+        };
+        device.issue = if device.connection == Connection::Connected {
+            None
+        } else {
+            observation.issue.clone()
+        };
+        bindings.insert(descriptor.key.clone(), device.saved.id.clone());
+    }
+    // Earlier bindings may point at a duplicate absorbed later in this round.
+    for id in bindings.values_mut() {
+        for (old, new) in &merged_ids {
+            if id == old {
+                *id = new.clone();
+            }
         }
     }
-    devices
+    MergeResult {
+        devices,
+        bindings,
+        merged_ids,
+    }
 }
 
 pub fn remove_offline(devices: &mut Vec<Device>, id: &str) -> Result<(), &'static str> {
     let index = devices
         .iter()
-        .position(|d| d.saved.id == id)
+        .position(|device| device.saved.id == id)
         .ok_or("设备记录已不存在")?;
     if devices[index].present {
         return Err("设备已连接，无法删除");
@@ -290,18 +361,17 @@ pub fn remove_offline(devices: &mut Vec<Device>, id: &str) -> Result<(), &'stati
     Ok(())
 }
 
-/// Explicitly move an orphaned remark to a receiver selected by the user.
 pub fn rebind(devices: &mut [Device], from: &str, to: &str) -> Result<(), &'static str> {
     if from == to {
         return Err("请选择不同的设备记录");
     }
     let source = devices
         .iter()
-        .position(|d| d.saved.id == from && !d.present)
+        .position(|device| device.saved.id == from && !device.present)
         .ok_or("原记录必须是离线设备")?;
     let target = devices
         .iter()
-        .position(|d| d.saved.id == to && d.present)
+        .position(|device| device.saved.id == to && device.present)
         .ok_or("目标设备必须在线")?;
     if devices[source].saved.alias.is_empty() {
         return Err("原记录没有备注");

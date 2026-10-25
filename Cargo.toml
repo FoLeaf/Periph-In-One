@@ -14,7 +14,7 @@ publish = false
 build = "build.rs"
 
 [dependencies]
-periph-hal = { path = "crates/periph-hal", default-features = false }
+periph-hal = { path = "crates/periph-hal", default-features = false, features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
