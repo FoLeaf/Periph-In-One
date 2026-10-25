@@ -16,6 +16,8 @@ try {
     Copy-Item -LiteralPath README.md,contribution.md -Destination $stage
     New-Item -ItemType Directory -Path "$stage/docs" -Force | Out-Null
     Copy-Item -LiteralPath docs/ADAPTATION.md -Destination "$stage/docs"
+    New-Item -ItemType Directory -Path "$stage/crates/periph-hal" -Force | Out-Null
+    Copy-Item -LiteralPath crates/periph-hal/README.md -Destination "$stage/crates/periph-hal"
     New-Item -ItemType Directory -Path "$stage/.github" -Force | Out-Null
     Copy-Item -LiteralPath .github/CICD.md -Destination "$stage/.github"
     New-Item -ItemType Directory -Path "$stage/assets/readme" -Force | Out-Null

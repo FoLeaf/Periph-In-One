@@ -9,21 +9,22 @@
 ```powershell
 cargo run --locked
 cargo fmt --all -- --check
-cargo test --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+cargo test --workspace --locked --all-targets
+cargo clippy --workspace --locked --all-targets -- -D warnings
 .\scripts\build-windows.ps1
 .\scripts\package.ps1
 ```
 
-打包前应完成 Release 构建；脚本拒绝覆盖同版本 ZIP。CI 在 Windows MSVC 上执行同一组检查；版本标签触发完整检查和 Release 草稿，操作步骤见 [CI / CD](.github/CICD.md)。Linux / macOS 不能验证 Windows 界面或硬件访问，核心逻辑可运行 `cargo test --locked --lib --test core`。
+打包前应完成 Release 构建；脚本拒绝覆盖同版本 ZIP。CI 在 Windows MSVC 上执行同一组检查，并在 Linux 检查独立 HAL。版本标签触发完整检查和 Release 草稿，操作步骤见 [CI / CD](.github/CICD.md)。Linux / macOS 不能验证 Windows 界面或硬件访问，可运行 `cargo test -p periph-hal --no-default-features --locked --all-targets`；应用核心逻辑还可运行 `cargo test --locked --lib --test core --test hardware`。
 
 ## 代码放在哪里
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/protocol.rs` | 纯报文构造、校验与解析，不执行设备 I/O |
-| `src/devices.rs` | 接收器匹配、HID 传输与设备读数 |
-| `src/vendor/` | 厂商适配器与注册表（见 [设备适配规范](docs/ADAPTATION.md)） |
+| `crates/periph-hal/` | 独立硬件库：公共设备/能力契约、后端注册、协议与平台实现（见 [库说明](crates/periph-hal/README.md)） |
+| `crates/periph-hal/src/protocol.rs` | 共享纯报文构造、校验与解析，不执行设备 I/O |
+| `crates/periph-hal/src/windows/` | HID 驱动、传输、拓扑、蓝牙属性后端；不依赖应用与界面 |
+| `src/devices.rs`、`src/hardware.rs` | HAL 与应用之间的兼容转换、旧记录键、失败范围及反馈 |
 | `src/model.rs` | 设备身份、历史记录、备注及合并规则 |
 | `src/config.rs` | 配置读取与原子保存 |
 | `src/app.rs` | Slint 数据绑定、后台任务和操作反馈 |

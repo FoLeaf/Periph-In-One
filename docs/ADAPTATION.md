@@ -1,60 +1,68 @@
 # 设备适配规范
 
-本文是新增或扩展设备适配的统一方法论。[contribution.md](../contribution.md) 保留硬性红线，本文展开完整流程。三家厂商驱动的分析范例（ATK HUB、KZZI 258A 家族、BIGBIG WON）待复查核验后填入第 7 节。
+本文规定独立硬件库与应用的边界，硬性红线见 [contribution.md](../contribution.md)，可复用接口及用法见 [periph-hal](../crates/periph-hal/README.md)。第 7 节保留现有协议的研究证据，历史叙述中的旧字段名不代表当前接口。
 
-## 1. 两层架构
+## 1. 公共契约与后端实现
 
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
-| 协议家族层 | `src/protocol.rs` | 帧构造、校验、解析的纯函数，无任何设备 I/O。一个家族一组 `xxx_request()` / `xxx_battery()` / `xxx_identity()` / `xxx_model_name()` |
-| 厂商适配器层 | `src/vendor/<vendor>.rs` | `VendorAdapter` trait 实现：匹配规则、设备类别、能力声明、一次探测；每家一个文件 |
-| 注册表 | `src/vendor/mod.rs` | `ADAPTERS` 常量数组，`scan()` 据此分发 |
-| 传输与拓扑 | `src/devices.rs` | `open_pair` / `send` / `drain` / `KzziLink` 传输件，ContainerId 分组，`port_location`，扫描编排 |
-| 身份 | `src/model.rs` | 四级身份链与历史合并，厂商无关，新适配不改此文件 |
+| 设备核心 | `crates/periph-hal/src/device.rs`、`hardware.rs`、`capability.rs` | 协议无关的描述、身份凭据、连接事实、类型化能力和后端注册；不含电量字段、UI 或配置 |
+| 电量能力 | `crates/periph-hal/src/battery.rs` | Value / Unsupported / Unavailable、百分比、来源及时间；是可选能力 |
+| 协议家族 | `crates/periph-hal/src/protocol.rs` | 报文构造、校验和解析的纯函数，不执行 I/O |
+| HID 驱动 | `crates/periph-hal/src/windows/vendor/` | 精确匹配、协议组合、设备角色和能力结果；不生成界面文案 |
+| Windows 访问后端 | `crates/periph-hal/src/windows/` | `hid.rs` 发现与分发、`transport.rs` 原生 I/O、`topology.rs` 拓扑与元数据、`bluetooth.rs` 系统属性 |
+| 应用兼容层 | `src/hardware.rs`、`src/devices.rs` | HAL 结果转现有应用记录、旧身份键兼容、失败范围与用户反馈 |
+| 应用业务 | `src/model.rs`、`src/config.rs` | 备注、历史、身份归并、配置保存；不进入硬件库 |
 
-现有家族：ATK FF05/FF02、ATK FF04（V2 鼠标，含 CompX 3554 段）、DARKRIM TLV、KZZI/Compx 0x13、BIGBIG WON(Zikway) FF7A A5。
+新增同能力协议不修改公共核心或应用规则；新增领域在独立模块实现 `Capability`，不向公共设备结构增加功能字段。能力值可以是观测或领域客户端；当前真实落地的是电量，连续数据和写能力待实际需求实现自己的接口与会话。
 
 规则：
 
-- 适配器只组合 `protocol.rs` 的帧函数，不内联构造字节；probe 与主应用共用同一份构造器，避免协议代码分叉。
-- 传输怪癖（如 KZZI 键盘必须走 `KzziLink` 原始句柄的 control endpoint 写入）留在适配器 `read` 内部，trait 不假设统一传输。
-- 错误以 UI 消息形式从 `Outcome.message` 浮出，适配器不向上抛传输错误。
+- 优先复用现有 hidapi、Windows API 和协议函数。新后端实现 `Backend` 并注册，不能把所有协议强制包装成同一种字节流。
+- HID 驱动只组合共享协议函数，probe 从库导入同一构造器。原始 Windows 探针辅助接口通过开发用 `diagnostics` feature 提供，应用正常运行不得依赖它。
+- 错误使用 `HardwareError` / `ErrorKind`。诊断详情与 UI 文案分离，禁止通过错误字符串包含某个中文词判断类别。
+- 库不访问 Slint、应用配置、用户备注或历史；不能新增这些依赖来解决驱动差异。
 
 ## 2. 公模（OEM）规则
 
-1. 同一协议家族、不同品牌：共用家族纯函数，每品牌一个薄适配器，各自 VID 与型号表；绝不把 A 品牌的 VID 集扩大到 B 品牌。
-2. 同一品牌、不同协议（如 ATK 同时使用 373B、CompX 3554、Zikway 413D 方案）：各自家族、各自适配器。
-3. 身份链以 VID 为键的一部分（`uid_key(vid, uid)`、`serial_key(vid, pid, serial)`），公模换牌后 VID 不同自然形成独立记录，无需特判。
+1. 同协议家族共用纯函数；各品牌 matcher 和型号数据保持证据边界，不因共享 VID 扩大识别范围。
+2. 同品牌不同协议分别实现；原始句柄与会话调度放在访问后端，避免领域业务争抢接口。
+3. 身份凭据包含命名空间和主体。接收器序列号不冒充外设 UID；USB VID 与 Bluetooth company ID 不属于同一编号体系。
 
 ## 3. 匹配与收录
 
-- 匹配必须锚定 VID 加 Usage Page / Usage；多家共用的通用 VID（如键盘常见的 0x258A）绝不能只按 VID 匹配。
-- PID 仅在家族跨固件人格保持同一 vendor interface 时才放开（例：BIGBIG WON 2104/2106 双固件态共享 FF7A）。
-- 档位沿用 contribution.md 的三档：已识别（匹配规则成立）、已实现（协议编码完成）、已实测（真机验证）。未接触过真机的协议结论最高标已实现，不得声称已实测。
-- matcher 收录：无线类设备可凭静态分析结论进入（标已实现未实测）；有线型号、显示器、dongle 不进 matcher，只记入附录设备表。通用 VID 的新条目必须附 Usage Page 锚定证据。
+- HID matcher 锚定 VID 加 Usage Page / Usage；共享 VID 不得只按 VID 匹配。PID 放开须有跨固件人格的接口证据。
+- 系统属性后端按总线、节点类型和属性语义匹配，不要求具有 HID Usage Page。未来 GATT 后端按实际服务/特征及设备证据匹配。
+- 区分已识别、已实现、已实测。静态分析结论不能升级为真机兼容承诺。
+- 当前电量产品的无线 matcher 可凭可核验静态证据进入（标未实测）；仅有线本体或无相关能力的条目不因商品名进入现有电量 matcher，先记录证据。未来新领域按自己的能力和产品需求决定收录，不沿用键鼠电量筛选器。
+- 角色标签用于分类与展示；能力由强类型契约决定，不要求每台设备具有电池。
 
-## 4. 能力声明
+## 4. 能力与状态
 
-适配器通过 `capabilities()` 声明能力集（`src/vendor/mod.rs` 的 `Capabilities`）：
+`Capabilities::insert` 按目标组件、契约 ID 和版本注册能力；应用用 `get::<T>` 访问。新增能力在下游模块实现 `Capability`，不扩充公共枚举或建立字符串 RPC。
 
-- `BATTERY`：电量读取，当前唯一已实现能力。
-- `LIGHTING`、`CONFIGURATION`：预留位。灯效、DPI、改键等写命令的帧格式记录在 probe 研究注释中；写路径落地前，任何适配器不得声明这些能力。
+- `BatteryState::Value`：0..=100 的有效观测，带 DeviceResponse / SystemCache 来源及观察时间。
+- `Unsupported`：型号或能力查询明确证明不支持。超时、未知特征和缺属性不能转换成它。
+- `Unavailable`：本轮读取失败或暂不可用，保留结构化原因。
+- `Connection` 独立于能力结果。接收器存在不证明外设在线，缓存电量也不证明在线；缺少连接证据使用 Unknown。
 
-能力按产品线声明；线内个别型号不提供电量（如 KZZI K75）由适配器按型号甄别后经 `Outcome.no_battery` 上报，UI 据此区分在线不提供电量与未响应。
+电量缺失不能清零，也不能使历史值变成新读数。系统未提供采样时间时 `sampled_at` 为 None；重复读取系统属性不能声称设备刚上报。UI 文案和历史样式在应用生成。
 
 ## 5. 适配流程
 
-1. **研究先行**：写 `examples/probe_<vendor>.rs`（模板：`examples/probe_bigbigwon.rs`；多厂商命令空间扫描参照 `probe_identity.rs`）。参数化帧构造器先进 `protocol.rs`，probe 从库导入，不携带副本。结论写在 probe 顶部 doc comment，注明来源与许可。
-2. **协议层**：在 `protocol.rs` 为家族添加纯函数，帧必须带校验（和校验或 CRC，按协议实际）。
-3. **适配器**：新建 `src/vendor/<vendor>.rs` 实现 `VendorAdapter`，注册进 `ADAPTERS`。
-4. **身份**：协议有每台唯一身份命令的，在 `read` 中读出并填 `Outcome.uid`，身份链自动接入。
-5. **测试**：`tests/core.rs` 添加帧构造、坏帧、截断、校验和、电量边界测试，用真机捕获字节；核实 `0%` 是否有效，未知电量不得转成零。
-6. **文档**：README 设备表加行；`docs/VALIDATION.md` 按版本记录验收（帧格式、真机读数、边界、测试数、SHA-256）。
-7. **检查**：`cargo fmt --all -- --check && cargo test --locked --all-targets && cargo clippy --locked --all-targets -- -D warnings`，再真机跑 `--once` 与 `--list-devices`。
+1. **研究**：先查现有协议、依赖和开源实现。需要协议探针时写 `examples/probe_<vendor>.rs`，结论注明来源、许可及未验证边界；报文函数不复制。
+2. **实现**：已有 HID 访问方式新增私有驱动及协议纯函数，注册 `ADAPTERS`；新访问方式实现并注册 `Backend`，类型和平台句柄留在后端内部。
+3. **能力**：返回公共设备描述和实际能力。电量、连接、错误分别表达；没有电池的设备不创建伪电量。
+4. **身份**：协议能报告本体 UID 则提供对应凭据；路由与身份分开。HID 多槽位的 HAL 路由始终含槽号，应用旧记录兼容不得泄漏进 HAL。
+5. **测试**：协议测试覆盖正常、截断、坏帧、校验、电量边界，确认零的实际语义。HAL 扩展测试放 `crates/periph-hal/tests/`；应用身份兼容测试放 `tests/`。
+6. **文档**：更新 README 兼容表和实际验证记录；不把伪后端测试写成真实硬件支持。原始安装包、设备序列号和整份抓包不入库。
+7. **检查**：执行 fmt、workspace all-targets 测试和 Clippy；独立库同时检查关闭默认 features 的可移植构建。相关硬件变更运行 `--once`、`--list-devices`，记录环境及未测部分。
 
-## 6. 身份链接入
+## 6. 身份与故障范围
 
-优先级从强到弱：协议 uid（`Outcome.uid`）> USB 序列号（`devices::raw_serial_number` 直读）> USB 父口位置（`port_location`，跨重枚举稳定）> 拓扑兜底。适配器只需要做一件事：协议能报告每台身份就填 uid，其余由 `model.rs` 完成。
+HAL 只提供身份证据；应用保留现有 UID > 序列号 > 物理位置 > 拓扑兜底规则，以及重复序列号、冲突备注和手动恢复。现有配置结构未变化，旧单接收器键的兼容转换位于 `src/hardware.rs`。
+
+`Hardware::scan()` 分别返回成功设备、完成的后端及后端失败；不能把失败后端的空结果视作确认离线。当前后端按序同步执行，尚不提供并行调度、推送生命周期或可强制中断的系统调用；应用在后台线程运行，未来按真实来源需求增加执行策略。
 
 ## 7. 范例
 
@@ -136,13 +144,23 @@
 
 来源：Windows 蓝牙栈行为验证（BTHENUM 枚举 + DEVPKEY 属性），SOUNDPEATS Space 真机实测；无需厂商驱动——经典蓝牙音频设备的电量由 Windows 经 HFP/AVRCP 收取，落在免提服务节点上。
 
-**识别与身份**：枚举 `BTHENUM` 总线（非蓝牙设备类，免提节点与设备节点分属不同类），以实例 ID 中的 12 位十六进制 MAC 为物理标识（`bt:<MAC>`）；设备节点与免提服务节点按 MAC 合并，仅列主类为音频/视频（class of device 位 8..13 = 4）且系统连接标志为真的设备。电量取自免提节点属性 `{104EA319-…}`/2 单字节，未知时不显示——连接状态与电量读数彼此独立。
+**识别与身份**：枚举 `BTHENUM` 总线（非蓝牙设备类，免提节点与设备节点分属不同类），以实例 ID 中的 12 位十六进制 MAC 为物理标识（`bt:<MAC>`）；设备节点与免提服务节点按 MAC 合并，按主类音频/视频识别。HAL 优先读取正式 ClassOfDevice 属性 10，兼容旧属性 4；连接属性缺失或格式无效为 Unknown，不能当已连接。电量属性校验类型与长度，接受 0..=100；Windows 缓存值使用 SystemCache 来源，无法确认采样时间时不生成采样时间。应用过滤已断开节点，在线无本轮电量时保留历史但不标成有效新读数。
 
 **边界**：只覆盖 Windows 已记录电量的经典音频设备；蓝牙 HID 外设（LE 触控板等）不走此路径。蓝牙设备无 HID 序列号，历史合并靠 MAC，跨适配器重配对不影响。
 
 ### 7.7 复查教训（第二批新增）
 
 **写语义的 sub_id 偏移必须真机核验**：HID++ 长寄存器读是 0x83 而非 0x82（Solaar 的 `0x8100 | 0x2B5` 中，长寄存器值的 0x200 位使 0x81 进位为 0x83；0x82 是长写）。初版把长读当 0x82 发上了真机——接收器对该写入静默忽略，配对未受影响，但这是扫描路径上真实的写操作，与"扫描零寄存器写入"红线冲突。规则：任何新寄存器路径先以探针在真机上确认应答回显，再进适配器；混淆代码中的数字常量（含字符串数组解码残留）不能单独作为字段依据，必须以字段名为锚交叉验证。
+
+## 8. HAL 首期迁移验证（2026-10-25）
+
+实施基线 `8b07ec9`，Windows x64 / Rust GNU 工具链；没有增加第三方依赖或改变应用配置结构。
+
+- `cargo fmt --all -- --check`、`cargo test --workspace --locked --all-targets`、`cargo clippy --workspace --locked --all-targets -- -D warnings` 通过，共 58 项测试。
+- 关闭默认 features 的独立库测试通过；`x86_64-unknown-linux-gnu` 目标的库及全部测试编译检查通过。该检查不代表 Linux 真机硬件支持。
+- 通过下游伪摄像头能力验证新增领域无需修改核心枚举或提供电量；回归检查独立后端失败、多组件能力、未知/不支持区别、有效 0%、历史读数、现有身份键与备注。
+- 当前机器 `--list-devices` 成功；`--once` 读到 ATK 鼠标 100%，KZZI K75 报告不提供电量，未唤醒的 BIGBIG WON 路径保持未响应。输出未含序列号或真实地址。
+- 本次未复验蓝牙真机电量、罗技一拖多、AULA 新款命令协议、休眠/热插拔与界面生命周期；第 7 节已有实测档位保留其原始来源，不因重构或伪后端测试升级兼容承诺。
 
 ## 附录 A：KZZI 258A 有线型号表（已识别档）
 
