@@ -48,6 +48,7 @@ Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当�
 
 - 启动时立即读取，之后每 60 秒刷新；也可手动刷新。
 - 设备备注、历史电量与窗口尺寸保存在 EXE 同级的 `config/settings.json`。移动程序时一起移动 `config/`。
+- 旧配置自动迁移，保留备注与历史；首次保存前生成 `settings.json.v1.bak` 原文件备份。
 - 开机启动默认关闭，可在设置中开启。自启时直接进入托盘。
 - 默认不联网、不遥测、不写日志；配置文件包含本机设备信息，请勿公开上传。
 
@@ -70,7 +71,7 @@ Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当�
 
 ## 从源码构建
 
-硬件适配已独立为 [periph-hal](crates/periph-hal/README.md)。应用复用其设备与能力接口；新增协议、后端和设备的流程见 [适配规范](docs/ADAPTATION.md)。
+硬件适配已独立为 [periph-hal](crates/periph-hal/README.md)。应用直接使用通用设备记录，先发现设备，再独立读取所需能力；设备核心不要求电池或 USB 标识。分层与扩展边界见 [架构说明](docs/HARDWARE-ARCHITECTURE.md)，新增协议、后端和设备的流程见 [适配规范](docs/ADAPTATION.md)。
 
 需要 **Windows x64、Rust 1.92+**。MSVC 工具链需安装 Visual Studio Build Tools 的“使用 C++ 的桌面开发”和 Windows SDK；GNU 工具链需可用的 MinGW-w64 链接器、`windres` 和 `ar`。依赖版本以提交的 `Cargo.lock` 为准。
 
@@ -112,7 +113,8 @@ Release 程序使用 Windows GUI 子系统；在需要读取命令输出时通�
 从 [contribution.md](contribution.md) 开始。欢迎提交设备适配、协议测试与界面改进；新设备请附脱敏后的 VID/PID、接口和可复现的读数证据。
 
 ```text
-src/         设备读取、协议、状态、配置与 Windows 集成
+crates/      独立 HAL、平台访问与协议实现
+src/         应用身份、电量历史、配置、展示与 Windows 集成
 ui/          Slint 页面与控件
 assets/      应用图标和 README 图像
 examples/    设备扫描与 README 截图生成

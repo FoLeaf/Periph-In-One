@@ -15,7 +15,7 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 .\scripts\package.ps1
 ```
 
-打包前应完成 Release 构建；脚本拒绝覆盖同版本 ZIP。CI 在 Windows MSVC 上执行同一组检查，并在 Linux 检查独立 HAL。版本标签触发完整检查和 Release 草稿，操作步骤见 [CI / CD](.github/CICD.md)。Linux / macOS 不能验证 Windows 界面或硬件访问，可运行 `cargo test -p periph-hal --no-default-features --locked --all-targets`；应用核心逻辑还可运行 `cargo test --locked --lib --test core --test hardware`。
+打包前应完成 Release 构建；脚本拒绝覆盖同版本 ZIP。CI 在 Windows MSVC 上执行同一组检查，并在 Linux 检查独立 HAL。版本标签触发完整检查和 Release 草稿，操作步骤见 [CI / CD](.github/CICD.md)。Linux / macOS 不能验证 Windows 界面或硬件访问，可运行 `cargo test -p periph-hal --no-default-features --locked --all-targets`，并加 `--features serde` 检查可选序列化；应用核心逻辑还可运行 `cargo test --locked --lib --test core --test model --test migration --test battery`。
 
 ## 代码放在哪里
 
@@ -24,13 +24,15 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 | `crates/periph-hal/` | 独立硬件库：公共设备/能力契约、后端注册、协议与平台实现（见 [库说明](crates/periph-hal/README.md)） |
 | `crates/periph-hal/src/protocol.rs` | 共享纯报文构造、校验与解析，不执行设备 I/O |
 | `crates/periph-hal/src/windows/` | HID 驱动、传输、拓扑、蓝牙属性后端；不依赖应用与界面 |
-| `src/devices.rs`、`src/hardware.rs` | HAL 与应用之间的兼容转换、旧记录键、失败范围及反馈 |
-| `src/model.rs` | 设备身份、历史记录、备注及合并规则 |
-| `src/config.rs` | 配置读取与原子保存 |
+| `src/devices.rs`、`src/hardware.rs` | 应用刷新：先发现，再显式调用所需能力 |
+| `src/model.rs` | 通用设备身份、记录 ID、备注、路由与连接归并 |
+| `src/battery.rs` | 独立电量观测、历史与多来源选择 |
+| `src/config.rs`、`src/migration.rs` | v2 配置读写、旧配置转换与原字节备份 |
+| `src/presentation.rs` | 角色、链路、硬件标识及状态的显示格式 |
 | `src/app.rs` | Slint 数据绑定、后台任务和操作反馈 |
 | `src/platform.rs` | Windows 窗口、托盘定位、自启、单实例等集成 |
 | `ui/app.slint` | 页面布局和交互控件 |
-| `tests/core.rs` | 协议、身份与配置回归测试 |
+| `tests/`、`crates/periph-hal/tests/` | 协议、通用身份、领域历史、配置迁移与能力生命周期测试 |
 
 添加功能前，先检查当前依赖、Rust / Slint / Windows API 与可复用的开源实现。优先使用已有能力；新增依赖需说明用途、许可证与体积影响。运行时和项目工具保持 Rust、Slint 或 PowerShell，不引入 Python / WebView 运行时。
 
@@ -42,6 +44,7 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 - 明确区分“已识别”“已实现协议”和“已实测电量”。至少检查正常读数、超时、断开 / 休眠与重连；未验证的型号和充电状态不要写成已支持。
 - 协议解析需要测试正常帧、截断 / 坏帧、校验和及电量边界；按协议核实 `0%` 是否有效，不能把未知电量转换成零。
 - HID 查询置于后台，设置有界超时，不阻塞 UI。不要把设置、灯效、固件或其他写入命令伪装成电量查询。
+- `inventory()` 仅枚举元数据；`discover()` 只做身份与拓扑发现，注册能力客户端；电量查询在 `Battery::read()` 执行。实时能力实现撤销，不能让旧客户端继续访问已重新发现的端点。
 - 新设备仍需沿用身份与历史模型。不要把接口路径、ContainerId、VID/PID 或设备名称冒充可靠序列号。
 - 提供协议依据的原始来源及其许可；不要提交来源不明的复制代码、厂商驱动、逆向工具或整份抓包。
 
@@ -49,7 +52,7 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 
 页面只显示当前数据、必要操作和即时反馈。业务约束通过控件状态、字段校验、提交确认和失败反馈表达；不要堆叠常驻规则说明、重复标题、重复按钮文案或实现细节。
 
-配置位于 EXE 同级 `config/settings.json`。保留原子保存和损坏文件保护；配置结构变更需要兼容策略与测试。修改身份匹配时检查备注保留、重复序列号、无序列号、离线历史和手动恢复。
+配置位于 EXE 同级 `config/settings.json`。v2 将通用设备记录与电量历史分开保存；v1 首次保存前备份原始字节到 `settings.json.v1.bak`，保留旧 ID、备注及历史。保留原子保存、损坏/未知版本保护及备份冲突保护；配置结构变更需要兼容策略与测试。修改身份匹配时检查备注保留、重复序列号、无序列号、离线历史和手动恢复。
 
 影响窗口生命周期的改动需要在 Windows 实际检查：首次显示、缩放、隐藏、托盘唤出、微缩展开、重复启动与退出。开机启动测试应使用隔离目录和临时快捷方式，不改开发者已有启动项。隔离副本仍共用单实例锁，测试前请自行退出运行中的正式实例。
 

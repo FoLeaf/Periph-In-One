@@ -7,7 +7,7 @@
 | 分支 push、Pull Request、手动运行 CI | 格式 → Windows 测试 → Clippy → Release 构建 → 打包 | Actions artifact，保留 14 天 |
 | 推送 `v*` 标签 | 复用完整 CI → 下载该次构建产物 → 验证 SHA256 → 创建 Release 草稿 | 便携 ZIP、ZIP 的 `SHA256SUMS.txt`、自动生成的发布说明 |
 
-格式检查使用 Ubuntu；程序测试、Slint 编译、资源嵌入和打包使用 Windows Server 2022 + x64 MSVC。所有 Cargo 构建和依赖解析保留 `--locked`。工具链沿用 stable；Cargo / 构建缓存使用 `Swatinem/rust-cache`，只有 main 更新缓存。
+格式检查使用 Ubuntu；Portable HAL 在 Ubuntu 测试关闭默认 features 的独立库、可选 serde 及 Clippy。程序测试、Slint 编译、资源嵌入和打包使用 Windows Server 2022 + x64 MSVC。所有 Cargo 构建和依赖解析保留 `--locked`。工具链沿用 stable；Cargo / 构建缓存使用 `Swatinem/rust-cache`，只有 main 更新缓存。
 
 同分支的新提交会取消旧 CI；标签发布不自动取消。普通检查只有仓库读取权限，仅创建草稿的 job 具有 `contents: write`。无需个人访问令牌，使用该次运行的 `GITHUB_TOKEN`。工作流不使用 `pull_request_target`，不把写权限交给 PR 构建。
 
@@ -31,7 +31,7 @@ CI 调用已有 PowerShell 构建和打包脚本，ZIP 包含许可声明与程�
 
 在 GitHub Settings 中启用 Actions，并允许上述官方 Actions、`dtolnay/rust-toolchain` 和 `Swatinem/rust-cache`。组织策略需允许发布 job 申请 `contents: write`。
 
-建议为 main 配置分支保护 / ruleset，要求 `Rust format`、`Windows x64` 两项检查成功后再合并，并限制 `v*` 标签的创建、更新与删除权限。这些是 GitHub 仓库设置，提交 YAML 不会自动启用。
+建议为 main 配置分支保护 / ruleset，要求 `Rust format`、`Portable HAL`、`Windows x64` 三项检查成功后再合并，并限制 `v*` 标签的创建、更新与删除权限。这些是 GitHub 仓库设置，提交 YAML 不会自动启用。
 
 Dependabot 每周合并分组检查 GitHub Actions 版本更新，更新 PR 经过同一 CI。Rust 依赖升级仍需评估 Slint 许可、兼容性和体积后单独提交。
 
