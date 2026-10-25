@@ -4,10 +4,11 @@
 //! GetUUID reports the 8-byte per-unit identity that anchors the record
 //! across personalities and ports.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::{drain, open_pair, send},
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::transport::{drain, open_pair, send},
 };
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 use std::time::{Duration, Instant};
@@ -25,31 +26,20 @@ impl VendorAdapter for BigbigwonGamepad {
         "gamepad"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         match probe(api, info) {
-            Ok((level, uid)) => Outcome {
-                battery: level,
+            Ok((battery, uid)) => Outcome {
+                battery,
                 uid,
-                message: "已连接".into(),
+                connection: Connection::Connected,
                 ..Outcome::default()
             },
-            Err(error) => Outcome {
-                message: if error.contains("未响应") {
-                    error
-                } else {
-                    "读取失败，请重新连接设备后刷新".into()
-                },
-                ..Outcome::default()
-            },
+            Err(error) => Outcome::failure(error),
         }
     }
 }
 
-fn probe(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), String> {
+fn probe(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), HardwareError> {
     let (reader, writer) = open_pair(api, info)?;
     let mut buffer = [0; 256];
     for _ in 0..3 {
@@ -59,7 +49,7 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), String
         while Instant::now() < end {
             let n = reader
                 .read_timeout(&mut buffer, 120)
-                .map_err(|e| e.to_string())?;
+                .map_err(HardwareError::transport)?;
             if n == 0 {
                 continue;
             }
@@ -68,7 +58,10 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), String
             }
         }
     }
-    Err("手柄未响应，请唤醒手柄后刷新".into())
+    Err(HardwareError::new(
+        ErrorKind::Timeout,
+        "gamepad did not respond",
+    ))
 }
 
 fn gamepad_uid(reader: &HidDevice, writer: &HidDevice) -> String {

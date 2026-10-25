@@ -8,10 +8,11 @@
 //! table and SDK (see docs/ADAPTATION.md §7.5); no unit has been probed on
 //! hardware, so this stays one tier below measured.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::{drain, open_pair, send},
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::transport::{drain, open_pair, send},
 };
 use hidapi::{DeviceInfo, HidApi};
 use std::time::{Duration, Instant};
@@ -36,25 +37,18 @@ impl VendorAdapter for AulaCommandKeyboard {
         "keyboard"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         match probe(api, info) {
             Ok(Some((level, _charging))) => Outcome {
                 battery: Some(level),
-                message: "已连接".into(),
+                connection: Connection::Connected,
                 ..Outcome::default()
             },
-            Ok(None) => Outcome {
-                message: "键盘未响应，请确认键盘已开机".into(),
-                ..Outcome::default()
-            },
-            Err(_) => Outcome {
-                message: "读取失败，请重新连接设备后刷新".into(),
-                ..Outcome::default()
-            },
+            Ok(None) => Outcome::failure(HardwareError::new(
+                ErrorKind::Timeout,
+                "keyboard did not respond",
+            )),
+            Err(error) => Outcome::failure(error),
         }
     }
 }
@@ -64,7 +58,7 @@ impl VendorAdapter for AulaCommandKeyboard {
 /// the dongle answers nothing on its behalf, so silence means "check the
 /// keyboard" here. The exchange needs no reply CRC: the vendor client also
 /// trusts only the echoed cmd/mode and the status byte.
-fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Option<(u8, u8)>, String> {
+fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Option<(u8, u8)>, HardwareError> {
     let (reader, writer) = open_pair(api, info)?;
     let mut buffer = [0u8; 64];
     for cmd in [protocol::AULA_CMD_BATTERY, protocol::AULA_CMD_BATTERY_ALT] {

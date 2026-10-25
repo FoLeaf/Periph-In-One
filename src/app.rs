@@ -3,7 +3,8 @@ use chrono::{DateTime, Local};
 use periph_in_one::{
     config::Config,
     devices,
-    model::{self, Device, Reading},
+    hardware::{self, ScanReport},
+    model::{self, Device},
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
@@ -22,7 +23,7 @@ pub enum Action {
     InitialShow,
     Refresh,
     ReadingStarted,
-    Readings(Result<Vec<Reading>, String>),
+    Readings(Result<ScanReport, String>),
     Show,
     Expand,
     Hide,
@@ -99,22 +100,16 @@ fn fallback_name(device: &Device) -> &str {
         &device.saved.alias
     } else if !device.saved.hardware_name.is_empty() {
         &device.saved.hardware_name
-    } else if device.saved.vid == 0x046d && device.saved.kind == "keyboard" {
-        "罗技无线键盘"
-    } else if device.saved.vid == 0x046d {
-        "罗技无线设备"
-    } else if device.saved.vid == 0x0c45 && device.saved.kind == "keyboard" {
-        "狼蛛无线键盘"
     } else if device.saved.kind == "mouse" {
-        "ATK 无线鼠标"
+        "无线鼠标"
     } else if device.saved.kind == "keyboard" {
-        "KZZI 无线键盘"
+        "无线键盘"
     } else if device.saved.kind == "gamepad" {
-        "BIGBIG WON 无线手柄"
+        "无线手柄"
     } else if device.saved.kind == "bt-headset" {
         "蓝牙耳机"
     } else {
-        "DARKRIM 无线耳机"
+        "无线耳机"
     }
 }
 
@@ -215,17 +210,20 @@ impl App {
                         .unwrap_or("—".into())
                         .into(),
                     level: saved.battery.unwrap_or(0).min(100) as f32 / 100.0,
-                    fresh: device.fresh,
+                    fresh: device.connection == periph_hal::Connection::Connected,
                     has_battery: device.fresh && saved.battery.is_some(),
                     present: device.present,
-                    status: if device.fresh {
+                    status: if device.connection == periph_hal::Connection::Connected {
                         "已连接".into()
-                    } else if !device.present {
+                    } else if device.connection == periph_hal::Connection::Disconnected {
                         "已离线".into()
+                    } else if !device.present {
+                        "状态未知".into()
                     } else {
                         "未响应".into()
                     },
                     updated: match saved.last_success {
+                        Some(_) if device.fresh && device.system_cached => "系统读数".into(),
                         Some(time) => format!(
                             "{} {}",
                             if device.fresh {
@@ -244,9 +242,17 @@ impl App {
             })
             .collect();
         self.ui.set_devices(ModelRc::new(VecModel::from(rows)));
-        let connected = self.devices.iter().filter(|d| d.fresh).count();
+        let connected = self
+            .devices
+            .iter()
+            .filter(|d| d.connection == periph_hal::Connection::Connected)
+            .count();
         let present = self.devices.iter().filter(|d| d.present).count();
-        let offline = self.devices.len() - present;
+        let offline = self
+            .devices
+            .iter()
+            .filter(|d| d.connection == periph_hal::Connection::Disconnected)
+            .count();
         let mut summary = vec![format!("{connected} 台已连接")];
         if present > connected {
             summary.push(format!("{} 台未响应", present - connected));
@@ -267,10 +273,12 @@ impl App {
                         .battery
                         .map(|b| format!("{b}%"))
                         .unwrap_or("—".into());
-                    let note = if !d.fresh {
-                        "（上次读数 / 未响应）"
-                    } else if d.saved.battery.is_none() {
+                    let note = if !d.fresh && d.saved.battery.is_some() {
+                        "（上次读数）"
+                    } else if d.no_battery {
                         "（不提供电量）"
+                    } else if d.saved.battery.is_none() {
+                        "（电量暂不可用）"
                     } else {
                         ""
                     };
@@ -316,17 +324,21 @@ impl App {
                 self.busy = false;
                 self.ui.set_busy(false);
                 match result {
-                    Ok(readings) => {
-                        let saved: Vec<_> = self.devices.iter().map(|d| d.saved.clone()).collect();
-                        self.devices = model::merge_readings(&saved, readings, now());
+                    Ok(report) => {
+                        let partial = !report.failures.is_empty();
+                        self.devices = hardware::merge_report(&self.devices, report, now());
                         self.ui.set_updated(
                             format!("上次刷新 {}", Local::now().format("%H:%M:%S")).into(),
                         );
                         self.persist("");
+                        if partial {
+                            self.notice("部分设备读取失败，请稍后刷新");
+                        }
                     }
                     Err(error) => {
                         for device in &mut self.devices {
                             device.fresh = false;
+                            device.connection = periph_hal::Connection::Unknown;
                             device.message = error.clone();
                         }
                         self.notice(error);
@@ -696,7 +708,7 @@ pub fn run() -> Result<(), String> {
         .spawn(move || {
             loop {
                 post(Action::ReadingStarted);
-                post(Action::Readings(devices::scan()));
+                post(Action::Readings(devices::scan_report()));
                 match receiver.recv_timeout(Duration::from_secs(60)) {
                     Ok(WorkerCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
                     Ok(WorkerCommand::Refresh) | Err(RecvTimeoutError::Timeout) => {}

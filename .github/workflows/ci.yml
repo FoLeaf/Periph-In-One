@@ -32,6 +32,21 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  portable-hal:
+    name: Portable HAL
+    needs: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo test -p periph-hal --no-default-features --locked --all-targets
+      - run: cargo clippy -p periph-hal --no-default-features --locked --all-targets -- -D warnings
+
   windows:
     name: Windows x64
     needs: format
@@ -64,9 +79,9 @@ jobs:
           key: windows-msvc
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Test all targets
-        run: cargo test --locked --all-targets
+        run: cargo test --workspace --locked --all-targets
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Build release
         run: ./scripts/build-windows.ps1
       - name: Package portable ZIP

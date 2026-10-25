@@ -1,15 +1,16 @@
 //! KZZI keyboards behind a Compx 2.4G receiver (3554:FA09). The receiver
 //! answers identity itself; battery queries are relayed to the keyboard and
 //! only models whose firmware implements them reply. Models verified to keep
-//! their battery private report `no_battery`, so a linked keyboard without a
+//! their battery private report Unsupported, so a linked keyboard without a
 //! reading is told apart from one that answered nothing. The interface only
 //! answers requests written through the control endpoint (hidapi fails there
-//! with error 1784), so the exchange runs on `devices::KzziLink` raw handles.
+//! with error 1784), so the exchange runs on `windows::transport::KzziLink` raw handles.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::KzziLink,
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::transport::KzziLink,
 };
 use hidapi::{DeviceInfo, HidApi};
 use std::time::{Duration, Instant};
@@ -28,37 +29,28 @@ impl VendorAdapter for KzziKeyboard {
         "keyboard"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, _api: &HidApi, info: &DeviceInfo) -> Outcome {
         match probe(info) {
-            Ok((battery, name, private)) => {
-                let identified = !name.is_empty();
-                Outcome {
-                    battery,
-                    no_battery: battery.is_none() && private,
-                    hardware_name: identified.then_some(name),
-                    message: if battery.is_some() {
-                        "已连接".into()
-                    } else if private {
-                        "该型号不提供电量".into()
-                    } else {
-                        "键盘未响应，请确认键盘已开机".into()
-                    },
-                    ..Outcome::default()
-                }
-            }
-            Err(_) => Outcome {
-                message: "读取失败，请重新连接设备后刷新".into(),
+            Ok((battery, name, unsupported)) => Outcome {
+                connection: if battery.is_some() || unsupported {
+                    Connection::Connected
+                } else {
+                    Connection::Unknown
+                },
+                issue: (battery.is_none() && !unsupported).then(|| {
+                    HardwareError::new(ErrorKind::Timeout, "keyboard battery did not respond")
+                }),
+                battery,
+                unsupported,
+                hardware_name: (!name.is_empty()).then_some(name),
                 ..Outcome::default()
             },
+            Err(error) => Outcome::failure(error),
         }
     }
 }
 
-fn probe(info: &DeviceInfo) -> Result<(Option<u8>, String, bool), String> {
+fn probe(info: &DeviceInfo) -> Result<(Option<u8>, String, bool), HardwareError> {
     let link = KzziLink::open(&info.path().to_string_lossy())?;
     let mut buffer = [0u8; 64];
     let mut name = String::new();
@@ -72,9 +64,7 @@ fn probe(info: &DeviceInfo) -> Result<(Option<u8>, String, bool), String> {
                 && let Some(psd) = protocol::kzzi_identity(&buffer[..n])
             {
                 private = protocol::kzzi_battery_private(&psd);
-                name = protocol::kzzi_model_name(&psd)
-                    .unwrap_or("无线键盘")
-                    .to_string();
+                name = protocol::kzzi_model_name(&psd).unwrap_or("").to_string();
             }
         }
         if !name.is_empty() {

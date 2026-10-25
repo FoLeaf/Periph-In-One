@@ -1,10 +1,6 @@
 pub mod config;
 pub mod model;
-pub mod protocol;
+pub use periph_hal::protocol;
+pub mod hardware;
 
-#[cfg(windows)]
-pub mod bluetooth;
-#[cfg(windows)]
 pub mod devices;
-#[cfg(windows)]
-pub mod vendor;

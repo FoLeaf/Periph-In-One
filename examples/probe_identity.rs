@@ -15,7 +15,7 @@
 //! Frame construction, checksums and the control-endpoint link all reuse
 //! the app's protocol/devices code, so this probe cannot drift from it.
 use hidapi::HidApi;
-use periph_in_one::devices::{KzziLink, drain, send};
+use periph_hal::diagnostics::{KzziLink, drain, send};
 use periph_in_one::protocol;
 use std::ffi::CString;
 use std::time::{Duration, Instant};

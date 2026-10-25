@@ -7,10 +7,11 @@ pub struct DeviceKey {
     pub local: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Connection {
     Connected,
     Disconnected,
+    #[default]
     Unknown,
 }
 

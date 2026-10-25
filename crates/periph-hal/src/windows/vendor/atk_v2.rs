@@ -4,10 +4,11 @@
 //! frames follow the reviewed ATK HUB JavaScript and are not yet verified on
 //! live hardware.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::{drain, open_pair},
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::transport::{drain, open_pair},
 };
 use hidapi::{DeviceInfo, HidApi};
 
@@ -51,37 +52,26 @@ impl VendorAdapter for AtkV2Mouse {
         "mouse"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         match read_battery(api, info) {
             Ok(level) => Outcome {
                 battery: Some(level),
-                message: "已连接".into(),
+                connection: Connection::Connected,
                 ..Outcome::default()
             },
-            Err(error) => Outcome {
-                message: if error.contains("未响应") {
-                    error
-                } else {
-                    "读取失败，请重新连接设备后刷新".into()
-                },
-                ..Outcome::default()
-            },
+            Err(error) => Outcome::failure(error),
         }
     }
 }
 
-fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, String> {
+fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, HardwareError> {
     let (reader, writer) = open_pair(api, info)?;
     let mut buffer = [0u8; 17];
     for _ in 0..3 {
         drain(&reader);
         writer
             .send_feature_report(&protocol::atk_ff04_battery_request())
-            .map_err(|e| e.to_string())?;
+            .map_err(HardwareError::transport)?;
         // The reply is a feature report on the control endpoint: a failed
         // send surfaces as an error, a silent device is bounded by the OS
         // control-transfer timeout. Not yet verified on live hardware.
@@ -93,7 +83,10 @@ fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, String> {
             return Ok(level);
         }
     }
-    Err("鼠标未响应，请移动鼠标后刷新".into())
+    Err(HardwareError::new(
+        ErrorKind::Timeout,
+        "mouse did not respond",
+    ))
 }
 
 #[cfg(test)]

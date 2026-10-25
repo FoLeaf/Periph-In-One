@@ -16,10 +16,14 @@
 //! collections and relaying short device frames through them is not
 //! verified.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::{container_id, drain, open_pair, send},
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::{
+        topology::container_id,
+        transport::{drain, open_pair, send},
+    },
 };
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 use std::time::{Duration, Instant};
@@ -68,10 +72,6 @@ impl VendorAdapter for LogitechReceiver {
         "mouse"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         self.read_all(api, info)
             .into_iter()
@@ -81,27 +81,18 @@ impl VendorAdapter for LogitechReceiver {
 
     fn read_all(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
         match probe(api, info) {
-            Ok(outcomes) if !outcomes.is_empty() => outcomes,
-            // The connections register counts paired slots, so pairings the
-            // pings cannot reach mean a device that is off or out of range;
-            // an empty probe leaves the receiver itself unaccounted for.
-            Ok(_) => vec![Outcome {
-                message: "设备未响应，请确认设备已开机".into(),
-                ..Outcome::default()
-            }],
-            Err(_) => vec![Outcome {
-                message: "读取失败，请重新连接设备后刷新".into(),
-                ..Outcome::default()
-            }],
+            Ok(outcomes) => outcomes,
+            Err(error) => vec![Outcome::failure(error)],
         }
     }
 }
 
-fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, String> {
+fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, HardwareError> {
     // The receiver exposes two collections of the same page, so the register
     // and tunnel interfaces are re-matched from the device list and grouped
     // by container — one scan result set per physical receiver.
-    Receiver::from_pid(info.product_id()).ok_or("未知罗技接收器")?;
+    Receiver::from_pid(info.product_id())
+        .ok_or_else(|| HardwareError::new(ErrorKind::Unsupported, "unknown receiver"))?;
     let container = container_id(info);
     let interfaces: Vec<DeviceInfo> = api
         .device_list()
@@ -111,11 +102,18 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, String> {
     let register_info = interfaces
         .iter()
         .find(|info| info.usage() == 0x01)
-        .ok_or("接收器缺少寄存器接口")?;
+        .ok_or_else(|| {
+            HardwareError::new(
+                ErrorKind::Unavailable,
+                "receiver register interface missing",
+            )
+        })?;
     let tunnel_info = interfaces
         .iter()
         .find(|info| info.usage() == 0x02)
-        .ok_or("接收器缺少设备通道接口")?;
+        .ok_or_else(|| {
+            HardwareError::new(ErrorKind::Unavailable, "receiver tunnel interface missing")
+        })?;
     let (reader, writer) = open_pair(api, register_info)?;
     let (tunnel_reader, tunnel_writer) = open_pair(api, tunnel_info)?;
     let mut buffer = [0; 256];
@@ -127,13 +125,13 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, String> {
         None,
     )?
     .map(protocol::hidpp_pairing_count) else {
-        return Ok(Vec::new());
+        return Ok(vec![Outcome::failure(HardwareError::new(
+            ErrorKind::Timeout,
+            "receiver did not respond",
+        ))]);
     };
     if paired == 0 {
-        return Ok(vec![Outcome {
-            message: "接收器上没有已配对的设备".into(),
-            ..Outcome::default()
-        }]);
+        return Ok(Vec::new());
     }
     let mut outcomes = Vec::new();
     for slot in 1..=paired.clamp(1, 6) {
@@ -146,6 +144,13 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, String> {
             |report| protocol::hidpp_ping_reply(report, slot),
         )?;
         if online.is_none() {
+            outcomes.push(Outcome {
+                slot: Some(slot),
+                ..Outcome::failure(HardwareError::new(
+                    ErrorKind::Timeout,
+                    "paired device did not respond",
+                ))
+            });
             continue;
         }
         let battery = hidpp_battery(&tunnel_reader, &tunnel_writer, &mut buffer, slot)?;
@@ -153,10 +158,12 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, String> {
             hidpp_name(&tunnel_reader, &tunnel_writer, &mut buffer, slot).unwrap_or_default();
         outcomes.push(Outcome {
             battery,
-            no_battery: battery.is_none(),
+            issue: battery.is_none().then(|| {
+                HardwareError::new(ErrorKind::Unavailable, "device reported no battery level")
+            }),
+            connection: Connection::Connected,
             hardware_name: (!name.is_empty()).then_some(name),
             slot: Some(slot),
-            message: "已连接".into(),
             ..Outcome::default()
         });
     }
@@ -170,12 +177,12 @@ fn read_matching<T>(
     buffer: &mut [u8; 256],
     timeout: Duration,
     matcher: impl Fn(&[u8]) -> Option<T>,
-) -> Result<Option<T>, String> {
+) -> Result<Option<T>, HardwareError> {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
         let n = reader
             .read_timeout(buffer, 100)
-            .map_err(|e| e.to_string())?;
+            .map_err(HardwareError::transport)?;
         if n == 0 {
             continue;
         }
@@ -195,7 +202,7 @@ fn hidpp_register(
     buffer: &mut [u8; 256],
     register: u8,
     values: Option<[u8; 3]>,
-) -> Result<Option<[u8; 3]>, String> {
+) -> Result<Option<[u8; 3]>, HardwareError> {
     let frame = match values {
         Some(values) => protocol::hidpp_set_register(0xff, register, values),
         None => protocol::hidpp_get_register(0xff, register),
@@ -204,7 +211,9 @@ fn hidpp_register(
     send(writer, &frame)?;
     let end = Instant::now() + Duration::from_millis(400);
     while Instant::now() < end {
-        let n = reader.read_timeout(buffer, 60).map_err(|e| e.to_string())?;
+        let n = reader
+            .read_timeout(buffer, 60)
+            .map_err(HardwareError::transport)?;
         if n == 0 {
             continue;
         }
@@ -230,7 +239,7 @@ fn hidpp_battery(
     writer: &HidDevice,
     buffer: &mut [u8; 256],
     device: u8,
-) -> Result<Option<u8>, String> {
+) -> Result<Option<u8>, HardwareError> {
     for (feature, function, parse) in [
         (
             protocol::HIDPP_FEATURE_UNIFIED_BATTERY,

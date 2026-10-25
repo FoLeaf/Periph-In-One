@@ -2,10 +2,11 @@
 //! 373B:1216 nano dongle (with its FF02 fallback interface) plus the wider
 //! FF05 mouse/receiver line from the reviewed ATK HUB device table.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::{drain, open_pair, send},
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::transport::{drain, open_pair, send},
 };
 use hidapi::{DeviceInfo, HidApi};
 use std::time::{Duration, Instant};
@@ -44,30 +45,19 @@ impl VendorAdapter for AtkMouse {
         "mouse"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         match read_battery(api, info) {
             Ok(level) => Outcome {
                 battery: Some(level),
-                message: "已连接".into(),
+                connection: Connection::Connected,
                 ..Outcome::default()
             },
-            Err(error) => Outcome {
-                message: if error.contains("未响应") {
-                    error
-                } else {
-                    "读取失败，请重新连接设备后刷新".into()
-                },
-                ..Outcome::default()
-            },
+            Err(error) => Outcome::failure(error),
         }
     }
 }
 
-fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, String> {
+fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, HardwareError> {
     let (reader, writer) = open_pair(api, info)?;
     let mut buffer = [0; 256];
     for _ in 0..3 {
@@ -81,7 +71,7 @@ fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, String> {
         while Instant::now() < end {
             let n = reader
                 .read_timeout(&mut buffer, 120)
-                .map_err(|e| e.to_string())?;
+                .map_err(HardwareError::transport)?;
             if n == 0 {
                 continue;
             }
@@ -95,7 +85,10 @@ fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, String> {
             }
         }
     }
-    Err("鼠标未响应，请移动鼠标后刷新".into())
+    Err(HardwareError::new(
+        ErrorKind::Timeout,
+        "mouse did not respond",
+    ))
 }
 
 #[cfg(test)]

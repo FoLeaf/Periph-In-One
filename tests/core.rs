@@ -15,6 +15,12 @@ fn reading(physical: &str, serial: &str, battery: Option<u8>) -> Reading {
         pid: 0x1216,
         battery,
         no_battery: false,
+        connection: if battery.is_some() {
+            periph_hal::Connection::Connected
+        } else {
+            periph_hal::Connection::Unknown
+        },
+        system_cached: false,
         message: String::new(),
     }
 }
@@ -34,6 +40,12 @@ fn gamepad_reading(physical: &str, uid: &str, pid: u16, battery: Option<u8>) -> 
         pid,
         battery,
         no_battery: false,
+        connection: if battery.is_some() {
+            periph_hal::Connection::Connected
+        } else {
+            periph_hal::Connection::Unknown
+        },
+        system_cached: false,
         message: String::new(),
     }
 }
@@ -201,12 +213,14 @@ fn kzzi_battery_private_covers_only_the_verified_profile() {
 }
 
 #[test]
-fn battery_private_devices_stay_fresh_without_inventing_values() {
+fn battery_private_devices_stay_connected_without_inventing_values() {
     let mut linked = reading("usb-port-a", "SN-K75", None);
     linked.no_battery = true;
+    linked.connection = periph_hal::Connection::Connected;
     let devices = model::merge_readings(&[], vec![linked], 100);
     assert!(devices[0].present);
-    assert!(devices[0].fresh);
+    assert!(!devices[0].fresh);
+    assert_eq!(devices[0].connection, periph_hal::Connection::Connected);
     assert_eq!(devices[0].saved.battery, None);
     assert_eq!(devices[0].saved.last_success, None);
     // A battery-capable device that stays silent is not fresh.
@@ -747,6 +761,8 @@ fn bluetooth_headset_identity_is_stable_across_scans() {
             pid: 0x000a,
             battery,
             no_battery: true,
+            connection: periph_hal::Connection::Connected,
+            system_cached: true,
             message: "已连接".into(),
         }
     }

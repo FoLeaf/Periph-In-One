@@ -1,3 +1,4 @@
+use periph_hal::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -28,9 +29,11 @@ pub struct Reading {
     pub vid: u16,
     pub pid: u16,
     pub battery: Option<u8>,
-    /// The adapter verified this device is live but its model provides no
-    /// battery reading; it stays fresh without a value.
+    /// A verified model provides no battery reading. Connection is independent
+    /// and this flag never makes a historical battery value fresh.
     pub no_battery: bool,
+    pub connection: Connection,
+    pub system_cached: bool,
     pub message: String,
 }
 
@@ -39,6 +42,9 @@ pub struct Device {
     pub saved: SavedDevice,
     pub present: bool,
     pub fresh: bool,
+    pub connection: Connection,
+    pub no_battery: bool,
+    pub system_cached: bool,
     pub message: String,
 }
 
@@ -124,6 +130,9 @@ fn reconcile_record(devices: &mut Vec<Device>, reading: &Reading, id: &str) -> u
             },
             present: false,
             fresh: false,
+            connection: Connection::Disconnected,
+            no_battery: false,
+            system_cached: false,
             message: String::new(),
         });
         return devices.len() - 1;
@@ -171,6 +180,9 @@ pub fn merge_readings(saved: &[SavedDevice], readings: Vec<Reading>, now: u64) -
             saved,
             present: false,
             fresh: false,
+            connection: Connection::Disconnected,
+            no_battery: false,
+            system_cached: false,
             message: "设备已离线".into(),
         })
         .collect();
@@ -253,7 +265,10 @@ pub fn merge_readings(saved: &[SavedDevice], readings: Vec<Reading>, now: u64) -
         device.saved.pid = reading.pid;
         device.saved.identity_conflict |= conflict;
         device.present = true;
-        device.fresh = reading.battery.is_some_and(|level| level <= 100) || reading.no_battery;
+        device.connection = reading.connection;
+        device.no_battery = reading.no_battery;
+        device.system_cached = reading.system_cached;
+        device.fresh = reading.battery.is_some_and(|level| level <= 100);
         device.message = reading.message;
         if let Some(battery) = reading.battery.filter(|b| *b <= 100) {
             device.saved.battery = Some(battery);

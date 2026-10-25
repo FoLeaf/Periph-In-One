@@ -22,6 +22,10 @@ pub struct HardwareError {
 }
 
 impl HardwareError {
+    pub fn transport(error: impl fmt::Display) -> Self {
+        Self::new(ErrorKind::Transport, error.to_string())
+    }
+
     pub fn new(kind: ErrorKind, detail: impl Into<String>) -> Self {
         Self {
             kind,

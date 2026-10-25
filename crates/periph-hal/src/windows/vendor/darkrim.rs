@@ -1,9 +1,10 @@
 //! DARKRIM SHADOW headset (3654:6901): CRC16-guarded TLV queries.
 
+use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
-    devices::{drain, open_pair, send},
     protocol,
-    vendor::{Capabilities, Outcome, VendorAdapter},
+    vendor::{Outcome, VendorAdapter},
+    windows::transport::{drain, open_pair, send},
 };
 use hidapi::{DeviceInfo, HidApi};
 use std::time::{Duration, Instant};
@@ -22,31 +23,27 @@ impl VendorAdapter for DarkrimHeadset {
         "headset"
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::BATTERY
-    }
-
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         match query(api, info) {
             Ok((battery, name)) => Outcome {
+                connection: if battery.is_some() || !name.is_empty() {
+                    Connection::Connected
+                } else {
+                    Connection::Unknown
+                },
+                issue: battery.is_none().then(|| {
+                    HardwareError::new(ErrorKind::Timeout, "headset battery did not respond")
+                }),
                 battery,
                 hardware_name: (!name.is_empty()).then_some(name),
-                message: if battery.is_some() {
-                    "已连接".into()
-                } else {
-                    "耳机未响应，请检查电源和连接".into()
-                },
                 ..Outcome::default()
             },
-            Err(_) => Outcome {
-                message: "读取失败，请重新连接设备后刷新".into(),
-                ..Outcome::default()
-            },
+            Err(error) => Outcome::failure(error),
         }
     }
 }
 
-fn query(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), String> {
+fn query(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), HardwareError> {
     let (reader, writer) = open_pair(api, info)?;
     let mut battery = None;
     let mut name = String::new();
@@ -58,7 +55,7 @@ fn query(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), String
         while Instant::now() < end {
             let n = reader
                 .read_timeout(&mut buffer, 100)
-                .map_err(|e| e.to_string())?;
+                .map_err(HardwareError::transport)?;
             let report = protocol::restore_darkrim_report_id(&buffer[..n]);
             if let Some(tlvs) = protocol::darkrim_tlvs(&report, seq) {
                 for (key, value) in tlvs {

@@ -8,6 +8,7 @@ mod capability;
 mod device;
 mod error;
 mod hardware;
+pub mod protocol;
 
 pub use capability::{Capabilities, Capability, CapabilityDescriptor};
 pub use device::{
@@ -16,3 +17,34 @@ pub use device::{
 };
 pub use error::{ErrorKind, HardwareError};
 pub use hardware::{Backend, BackendFailure, Hardware, Inventory, Snapshot};
+
+#[cfg(all(windows, feature = "windows-backend"))]
+mod windows;
+#[cfg(all(windows, feature = "windows-backend"))]
+use windows::vendor;
+
+impl Hardware {
+    /// Construct backends for the current OS. Unsupported platforms return an
+    /// error instead of pretending an empty hardware inventory is authoritative.
+    pub fn system() -> Result<Self, HardwareError> {
+        #[cfg(all(windows, feature = "windows-backend"))]
+        {
+            let mut hardware = Self::new();
+            hardware.register(windows::HidBackend)?;
+            hardware.register(windows::BluetoothAudioBackend)?;
+            Ok(hardware)
+        }
+        #[cfg(not(all(windows, feature = "windows-backend")))]
+        Err(HardwareError::new(
+            ErrorKind::Unsupported,
+            "no platform backend enabled",
+        ))
+    }
+}
+
+/// Explicit platform-specific probe tools, excluded from the portable API and
+/// normal application builds. They never form a dependency of app business code.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub mod diagnostics {
+    pub use crate::windows::transport::{KzziLink, drain, send};
+}
