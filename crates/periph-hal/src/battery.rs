@@ -1,6 +1,9 @@
 //! Battery observations are one optional domain contract, not device-core data.
-use crate::{Capability, ErrorKind, HardwareError};
-use std::time::SystemTime;
+use crate::{Capability, DeviceFacts, ErrorKind, HardwareError};
+use std::{
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Percent(u8);
@@ -45,6 +48,61 @@ pub enum BatteryState {
     Unavailable(HardwareError),
 }
 
-impl Capability for BatteryState {
+#[derive(Clone, Debug)]
+pub struct BatteryReading {
+    pub state: BatteryState,
+    pub facts: DeviceFacts,
+}
+
+pub trait BatteryReader: Send + Sync {
+    fn read(&self) -> Result<BatteryReading, HardwareError>;
+}
+
+impl<F> BatteryReader for F
+where
+    F: Fn() -> Result<BatteryReading, HardwareError> + Send + Sync,
+{
+    fn read(&self) -> Result<BatteryReading, HardwareError> {
+        self()
+    }
+}
+
+/// An independently sampled capability, valid until rediscovery or shutdown.
+#[derive(Clone)]
+pub struct Battery {
+    reader: Arc<Mutex<Option<Arc<dyn BatteryReader>>>>,
+}
+
+impl Battery {
+    pub fn new(reader: impl BatteryReader + 'static) -> Self {
+        Self {
+            reader: Arc::new(Mutex::new(Some(Arc::new(reader)))),
+        }
+    }
+
+    pub fn read(&self) -> Result<BatteryReading, HardwareError> {
+        let reader = self.reader.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "battery capability lock poisoned")
+        })?;
+        reader
+            .as_ref()
+            .ok_or_else(|| {
+                HardwareError::new(ErrorKind::Unavailable, "battery capability has expired")
+            })?
+            .read()
+    }
+
+    pub fn close(&self) {
+        if let Ok(mut reader) = self.reader.lock() {
+            reader.take();
+        }
+    }
+}
+
+impl Capability for Battery {
     const ID: &'static str = "power.battery";
+    const VERSION: u16 = 2;
+    fn invalidate(&self) {
+        self.close();
+    }
 }

@@ -694,9 +694,15 @@ pub fn run() -> Result<(), String> {
     let worker = thread::Builder::new()
         .name("battery-reader".into())
         .spawn(move || {
+            let mut hardware = periph_hal::Hardware::system()
+                .map_err(|_| "当前系统没有可用的设备后端".to_string());
             loop {
                 post(Action::ReadingStarted);
-                post(Action::Readings(devices::scan()));
+                let report = match hardware.as_mut() {
+                    Ok(hardware) => Ok(devices::refresh(hardware)),
+                    Err(error) => Err(error.clone()),
+                };
+                post(Action::Readings(report));
                 match receiver.recv_timeout(Duration::from_secs(60)) {
                     Ok(WorkerCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
                     Ok(WorkerCommand::Refresh) | Err(RecvTimeoutError::Timeout) => {}

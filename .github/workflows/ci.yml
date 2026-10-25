@@ -45,6 +45,7 @@ jobs:
         with:
           components: clippy
       - run: cargo test -p periph-hal --no-default-features --locked --all-targets
+      - run: cargo test -p periph-hal --no-default-features --features serde --locked --all-targets
       - run: cargo clippy -p periph-hal --no-default-features --locked --all-targets -- -D warnings
 
   windows:

@@ -1,11 +1,13 @@
-use crate::{Device, DeviceDescriptor, ErrorKind, HardwareError};
+use crate::{Capabilities, Device, DeviceDescriptor, ErrorKind, HardwareError};
+use std::collections::BTreeMap;
 
 /// A polling/discovery backend. Continuous domain data belongs to a typed
 /// capability session, not this inventory/snapshot interface.
 pub trait Backend {
     fn id(&self) -> &str;
     fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError>;
-    fn scan(&mut self) -> Result<Vec<Device>, HardwareError>;
+    /// Return device facts and clients without sampling their capabilities.
+    fn discover(&mut self) -> Result<Vec<Device>, HardwareError>;
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +36,7 @@ pub struct Snapshot {
 #[derive(Default)]
 pub struct Hardware {
     backends: Vec<Box<dyn Backend>>,
+    live: BTreeMap<String, Vec<Capabilities>>,
 }
 
 impl Hardware {
@@ -67,12 +70,24 @@ impl Hardware {
         result
     }
 
-    pub fn scan(&mut self) -> Snapshot {
+    pub fn discover(&mut self) -> Snapshot {
         let mut result = Snapshot::default();
         for backend in &mut self.backends {
             let id = backend.id().to_owned();
-            match backend.scan() {
+            if let Some(previous) = self.live.remove(&id) {
+                for capabilities in previous {
+                    capabilities.invalidate();
+                }
+            }
+            match backend.discover() {
                 Ok(devices) => {
+                    self.live.insert(
+                        id.clone(),
+                        devices
+                            .iter()
+                            .map(|device| device.capabilities.clone())
+                            .collect(),
+                    );
                     result.devices.extend(devices);
                     result.completed.push(id);
                 }
@@ -80,5 +95,13 @@ impl Hardware {
             }
         }
         result
+    }
+}
+
+impl Drop for Hardware {
+    fn drop(&mut self) {
+        for capabilities in self.live.values().flatten() {
+            capabilities.invalidate();
+        }
     }
 }

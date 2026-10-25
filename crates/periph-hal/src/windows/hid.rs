@@ -1,13 +1,17 @@
 //! HID discovery and driver dispatch. Native topology and I/O are separate.
 use super::topology::{container_id, port_location, raw_serial_number};
 use crate::{
-    Capabilities, Device, DeviceDescriptor, DeviceKey, ErrorKind, HardwareError,
-    HardwareIdentifier, Identity, IdentityKind, Link,
-    battery::{BatteryState, Percent, Sample, SampleOrigin},
+    Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind,
+    HardwareError, HardwareIdentifier, Identity, IdentityKind, Link,
+    battery::{Battery, BatteryReading, BatteryState, Percent, Sample, SampleOrigin},
     vendor,
 };
 use hidapi::{DeviceInfo, HidApi};
-use std::{collections::BTreeMap, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 fn receiver_interfaces(api: &HidApi) -> BTreeMap<String, Vec<&DeviceInfo>> {
     let mut groups: BTreeMap<String, Vec<&DeviceInfo>> = BTreeMap::new();
@@ -95,7 +99,7 @@ fn descriptor(
     }
 }
 
-pub fn scan() -> Result<Vec<Device>, HardwareError> {
+pub fn discover() -> Result<Vec<Device>, HardwareError> {
     let api = HidApi::new().map_err(HardwareError::transport)?;
     let mut result = Vec::new();
     for interfaces in receiver_interfaces(&api).values() {
@@ -103,27 +107,13 @@ pub fn scan() -> Result<Vec<Device>, HardwareError> {
         let Some(adapter) = vendor::ADAPTERS.iter().find(|a| a.matches(info)) else {
             continue;
         };
-        for outcome in adapter.read_all(&api, info) {
+        let lock = Arc::new(Mutex::new(()));
+        for outcome in adapter.discover(&api, info) {
             let mut route = port_location(info);
             if let Some(slot) = outcome.slot {
                 route.push_str(&format!("#{slot}"));
             }
             let mut capabilities = Capabilities::default();
-            let battery = if let Some(level) = outcome.battery {
-                BatteryState::Value(Sample {
-                    level: Percent::new(level)?,
-                    origin: SampleOrigin::DeviceResponse,
-                    observed_at: SystemTime::now(),
-                    sampled_at: None,
-                })
-            } else if outcome.unsupported {
-                BatteryState::Unsupported
-            } else {
-                BatteryState::Unavailable(outcome.issue.clone().unwrap_or_else(|| {
-                    HardwareError::new(ErrorKind::Unavailable, "battery level unavailable")
-                }))
-            };
-            capabilities.insert("main", battery)?;
             let mut description = descriptor(
                 info,
                 route,
@@ -135,6 +125,100 @@ pub fn scan() -> Result<Vec<Device>, HardwareError> {
                 .slot
                 .map(|slot| format!("slot:{slot}"))
                 .unwrap_or_default();
+            let expected = info.clone();
+            let expected_description = description.clone();
+            let slot = outcome.slot;
+            let unsupported = outcome.unsupported;
+            let lock = lock.clone();
+            capabilities.insert(
+                "main",
+                Battery::new(move || {
+                    if unsupported {
+                        return Ok(BatteryReading {
+                            state: BatteryState::Unsupported,
+                            facts: DeviceFacts::default(),
+                        });
+                    }
+                    let _guard = lock.lock().map_err(|_| {
+                        HardwareError::new(ErrorKind::Unavailable, "receiver session lock poisoned")
+                    })?;
+                    let api = HidApi::new().map_err(HardwareError::transport)?;
+                    let current = api
+                        .device_list()
+                        .find(|current| {
+                            current.path() == expected.path()
+                                && current.vendor_id() == expected.vendor_id()
+                                && current.product_id() == expected.product_id()
+                        })
+                        .ok_or_else(|| {
+                            HardwareError::new(
+                                ErrorKind::Unavailable,
+                                "device endpoint disappeared",
+                            )
+                        })?;
+                    let current_serial = raw_serial_number(current);
+                    if expected_description.identities.iter().any(|identity| {
+                        identity.kind == IdentityKind::Serial
+                            && !current_serial.is_empty()
+                            && identity.value != current_serial
+                    }) {
+                        return Err(HardwareError::new(
+                            ErrorKind::Conflict,
+                            "endpoint identity changed",
+                        ));
+                    }
+                    let adapter = vendor::ADAPTERS
+                        .iter()
+                        .find(|adapter| adapter.matches(current))
+                        .ok_or_else(|| {
+                            HardwareError::new(ErrorKind::Unsupported, "no matching driver")
+                        })?;
+                    let result = adapter.read_target(&api, current, slot);
+                    if !result.uid.is_empty()
+                        && expected_description.identities.iter().any(|identity| {
+                            identity.kind == IdentityKind::UnitId && identity.value != result.uid
+                        })
+                    {
+                        return Err(HardwareError::new(
+                            ErrorKind::Conflict,
+                            "peripheral identity changed",
+                        ));
+                    }
+                    let state = if let Some(level) = result.battery {
+                        BatteryState::Value(Sample {
+                            level: Percent::new(level)?,
+                            origin: SampleOrigin::DeviceResponse,
+                            observed_at: SystemTime::now(),
+                            sampled_at: None,
+                        })
+                    } else if result.unsupported {
+                        BatteryState::Unsupported
+                    } else {
+                        BatteryState::Unavailable(result.issue.unwrap_or_else(|| {
+                            HardwareError::new(ErrorKind::Unavailable, "battery level unavailable")
+                        }))
+                    };
+                    let identities = if result.uid.is_empty() {
+                        vec![]
+                    } else {
+                        vec![Identity {
+                            namespace: format!("usb:{:04x}", current.vendor_id()),
+                            kind: IdentityKind::UnitId,
+                            subject: "device".into(),
+                            value: result.uid,
+                        }]
+                    };
+                    Ok(BatteryReading {
+                        state,
+                        facts: DeviceFacts {
+                            connection: (result.connection != Connection::Unknown)
+                                .then_some(result.connection),
+                            name: result.hardware_name,
+                            identities,
+                        },
+                    })
+                }),
+            )?;
             result.push(Device {
                 descriptor: description,
                 connection: outcome.connection,

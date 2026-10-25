@@ -64,10 +64,7 @@ fn cache_without_connection_proof_is_never_a_current_reading() {
         observed_at: std::time::UNIX_EPOCH,
         sampled_at: None,
     };
-    uncertain
-        .capabilities
-        .insert("main", BatteryState::Value(sample))
-        .unwrap();
+    support::battery_state(&mut uncertain, "main", BatteryState::Value(sample));
     let records = hardware::merge_report(
         &[],
         &mut power,
@@ -83,10 +80,7 @@ fn cache_without_connection_proof_is_never_a_current_reading() {
 fn unsupported_and_offline_history_do_not_look_fresh() {
     let mut power = Batteries::default();
     let mut target = device("one", "a", "unit", "");
-    target
-        .capabilities
-        .insert("main", BatteryState::Unsupported)
-        .unwrap();
+    support::battery_state(&mut target, "main", BatteryState::Unsupported);
     let records = hardware::merge_report(
         &[],
         &mut power,
@@ -97,4 +91,43 @@ fn unsupported_and_offline_history_do_not_look_fresh() {
     assert!(view.unsupported);
     assert!(!view.current);
     assert_eq!(view.level, None);
+}
+
+#[test]
+fn direct_reading_wins_over_cache_in_both_view_and_history() {
+    for reversed in [false, true] {
+        let mut power = Batteries::default();
+        let mut cached = device("cache", "a", "unit", "");
+        let sample = periph_hal::battery::Sample {
+            level: periph_hal::battery::Percent::new(20).unwrap(),
+            origin: SampleOrigin::SystemCache,
+            observed_at: std::time::UNIX_EPOCH,
+            sampled_at: None,
+        };
+        support::battery_state(&mut cached, "main", BatteryState::Value(sample));
+        let mut direct = device("direct", "b", "unit", "");
+        battery(&mut direct, "main", Some(80));
+        let observations = if reversed {
+            vec![direct, cached]
+        } else {
+            vec![cached, direct]
+        };
+        let records = hardware::merge_report(
+            &[],
+            &mut power,
+            hardware::from_snapshot(snapshot(observations, &["cache", "direct"])),
+            1,
+        );
+        let id = &records[0].saved.id;
+        assert_eq!(power.view(id, "main").level, Some(80));
+        assert!(!power.view(id, "main").system_cached);
+        let offline = hardware::merge_report(
+            &records,
+            &mut power,
+            hardware::from_snapshot(snapshot(vec![], &["cache", "direct"])),
+            2,
+        );
+        assert_eq!(power.view(&offline[0].saved.id, "main").level, Some(80));
+        assert!(!power.view(&offline[0].saved.id, "main").current);
+    }
 }

@@ -77,3 +77,30 @@ pub struct Device {
     pub capabilities: Capabilities,
     pub issue: Option<HardwareError>,
 }
+
+/// Facts established during a capability operation, independent of its domain.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceFacts {
+    pub connection: Option<Connection>,
+    pub name: Option<String>,
+    pub identities: Vec<Identity>,
+}
+
+impl DeviceFacts {
+    pub fn apply_to(&self, device: &mut Device) {
+        if let Some(connection) = self.connection {
+            device.connection = connection;
+        }
+        if let Some(name) = &self.name {
+            device.descriptor.name = name.clone();
+        }
+        for identity in &self.identities {
+            device.descriptor.identities.retain(|old| {
+                !(old.namespace == identity.namespace
+                    && old.kind == identity.kind
+                    && old.subject == identity.subject)
+            });
+            device.descriptor.identities.push(identity.clone());
+        }
+    }
+}

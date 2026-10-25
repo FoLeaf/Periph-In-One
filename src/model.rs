@@ -310,6 +310,23 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
             device.saved.routes.push(descriptor.key.clone());
         }
         let mut updated = descriptor.clone();
+        if already_seen {
+            for role in &device.saved.descriptor.roles {
+                if !updated.roles.contains(role) {
+                    updated.roles.push(role.clone());
+                }
+            }
+            for identifier in &device.saved.descriptor.identifiers {
+                if !updated.identifiers.contains(identifier) {
+                    updated.identifiers.push(identifier.clone());
+                }
+            }
+            for link in &device.saved.descriptor.links {
+                if !updated.links.contains(link) {
+                    updated.links.push(link.clone());
+                }
+            }
+        }
         // Temporarily missing strong evidence must not downgrade identity.
         for identity in &device.saved.descriptor.identities {
             if strong(identity) && !updated.identities.contains(identity) {
@@ -322,10 +339,17 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         device.saved.descriptor = updated;
         device.saved.identity_conflict |= conflict;
         device.present |= observation.connection != Connection::Disconnected;
-        device.connection = if already_seen && device.connection == Connection::Connected {
-            Connection::Connected
-        } else {
-            observation.connection
+        device.connection = match (
+            if already_seen || device.connection == Connection::Unknown {
+                device.connection
+            } else {
+                Connection::Disconnected
+            },
+            observation.connection,
+        ) {
+            (Connection::Connected, _) | (_, Connection::Connected) => Connection::Connected,
+            (Connection::Unknown, _) | (_, Connection::Unknown) => Connection::Unknown,
+            _ => Connection::Disconnected,
         };
         device.issue = if device.connection == Connection::Connected {
             None

@@ -6,6 +6,8 @@ use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
 pub trait Capability: Any + Send + Sync {
     const ID: &'static str;
     const VERSION: u16 = 1;
+    /// Revoke live clients before rediscovery or backend shutdown.
+    fn invalidate(&self) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +22,7 @@ pub struct CapabilityDescriptor {
 struct Entry {
     descriptor: CapabilityDescriptor,
     value: Arc<dyn Any + Send + Sync>,
+    invalidate: fn(&(dyn Any + Send + Sync)),
 }
 
 /// Type erasure is confined here. Consumers only register/get concrete contracts;
@@ -58,6 +61,11 @@ impl Capabilities {
                     component,
                 },
                 value: Arc::new(value),
+                invalidate: |value| {
+                    if let Some(value) = value.downcast_ref::<C>() {
+                        value.invalidate();
+                    }
+                },
             },
         );
         Ok(())
@@ -72,6 +80,12 @@ impl Capabilities {
 
     pub fn descriptors(&self) -> impl Iterator<Item = &CapabilityDescriptor> {
         self.entries.values().map(|entry| &entry.descriptor)
+    }
+
+    pub(crate) fn invalidate(&self) {
+        for entry in self.entries.values() {
+            (entry.invalidate)(entry.value.as_ref());
+        }
     }
 }
 

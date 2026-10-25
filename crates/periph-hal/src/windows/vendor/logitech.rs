@@ -80,14 +80,45 @@ impl VendorAdapter for LogitechReceiver {
     }
 
     fn read_all(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
-        match probe(api, info) {
+        match probe(api, info, true, None) {
             Ok(outcomes) => outcomes,
             Err(error) => vec![Outcome::failure(error)],
         }
     }
+
+    fn discover(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
+        match probe(api, info, false, None) {
+            Ok(outcomes) => outcomes,
+            Err(error) => vec![Outcome {
+                slot: matches!(
+                    Receiver::from_pid(info.product_id()),
+                    Some(Receiver::Lightspeed)
+                )
+                .then_some(1),
+                ..Outcome::failure(error)
+            }],
+        }
+    }
+
+    fn read_target(&self, api: &HidApi, info: &DeviceInfo, slot: Option<u8>) -> Outcome {
+        match probe(api, info, true, slot) {
+            Ok(outcomes) => outcomes.into_iter().next().unwrap_or_else(|| {
+                Outcome::failure(HardwareError::new(
+                    ErrorKind::Unavailable,
+                    "receiver target disappeared",
+                ))
+            }),
+            Err(error) => Outcome::failure(error),
+        }
+    }
 }
 
-fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, HardwareError> {
+fn probe(
+    api: &HidApi,
+    info: &DeviceInfo,
+    sample_battery: bool,
+    requested: Option<u8>,
+) -> Result<Vec<Outcome>, HardwareError> {
     // The receiver exposes two collections of the same page, so the register
     // and tunnel interfaces are re-matched from the device list and grouped
     // by container — one scan result set per physical receiver.
@@ -134,7 +165,18 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, HardwareError>
         return Ok(Vec::new());
     }
     let mut outcomes = Vec::new();
-    for slot in 1..=paired.clamp(1, 6) {
+    let capacity = if matches!(
+        Receiver::from_pid(info.product_id()),
+        Some(Receiver::Lightspeed)
+    ) {
+        1
+    } else {
+        6
+    };
+    for slot in 1..=capacity {
+        if requested.is_some_and(|requested| requested != slot) {
+            continue;
+        }
         drain(&tunnel_reader);
         send(&tunnel_writer, &protocol::hidpp_ping(slot))?;
         let online = read_matching(
@@ -144,21 +186,30 @@ fn probe(api: &HidApi, info: &DeviceInfo) -> Result<Vec<Outcome>, HardwareError>
             |report| protocol::hidpp_ping_reply(report, slot),
         )?;
         if online.is_none() {
-            outcomes.push(Outcome {
-                slot: Some(slot),
-                ..Outcome::failure(HardwareError::new(
-                    ErrorKind::Timeout,
-                    "paired device did not respond",
-                ))
-            });
+            if capacity == 1 || requested == Some(slot) {
+                outcomes.push(Outcome {
+                    slot: Some(slot),
+                    ..Outcome::failure(HardwareError::new(
+                        ErrorKind::Timeout,
+                        "paired device did not respond",
+                    ))
+                });
+            }
             continue;
         }
-        let battery = hidpp_battery(&tunnel_reader, &tunnel_writer, &mut buffer, slot)?;
-        let name =
-            hidpp_name(&tunnel_reader, &tunnel_writer, &mut buffer, slot).unwrap_or_default();
+        let battery = if sample_battery {
+            hidpp_battery(&tunnel_reader, &tunnel_writer, &mut buffer, slot)?
+        } else {
+            None
+        };
+        let name = if !sample_battery {
+            hidpp_name(&tunnel_reader, &tunnel_writer, &mut buffer, slot).unwrap_or_default()
+        } else {
+            String::new()
+        };
         outcomes.push(Outcome {
             battery,
-            issue: battery.is_none().then(|| {
+            issue: (sample_battery && battery.is_none()).then(|| {
                 HardwareError::new(ErrorKind::Unavailable, "device reported no battery level")
             }),
             connection: Connection::Connected,

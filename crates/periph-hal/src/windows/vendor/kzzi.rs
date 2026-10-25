@@ -48,29 +48,51 @@ impl VendorAdapter for KzziKeyboard {
             Err(error) => Outcome::failure(error),
         }
     }
+
+    fn discover(&self, _api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
+        match KzziLink::open(&info.path().to_string_lossy()).and_then(|link| identify(&link)) {
+            Ok((name, unsupported)) => vec![Outcome {
+                hardware_name: (!name.is_empty()).then_some(name),
+                unsupported,
+                connection: if unsupported {
+                    Connection::Connected
+                } else {
+                    Connection::Unknown
+                },
+                ..Outcome::default()
+            }],
+            Err(error) => vec![Outcome::failure(error)],
+        }
+    }
 }
 
-fn probe(info: &DeviceInfo) -> Result<(Option<u8>, String, bool), HardwareError> {
-    let link = KzziLink::open(&info.path().to_string_lossy())?;
+fn identify(link: &KzziLink) -> Result<(String, bool), HardwareError> {
     let mut buffer = [0u8; 64];
-    let mut name = String::new();
-    let mut private = false;
     for _ in 0..3 {
         link.drain();
         link.send(&protocol::kzzi_identity_request())?;
         let end = Instant::now() + Duration::from_millis(600);
-        while name.is_empty() && Instant::now() < end {
+        while Instant::now() < end {
             if let Some(n) = link.read(&mut buffer, Duration::from_millis(120))
                 && let Some(psd) = protocol::kzzi_identity(&buffer[..n])
             {
-                private = protocol::kzzi_battery_private(&psd);
-                name = protocol::kzzi_model_name(&psd).unwrap_or("").to_string();
+                return Ok((
+                    protocol::kzzi_model_name(&psd).unwrap_or_default().into(),
+                    protocol::kzzi_battery_private(&psd),
+                ));
             }
         }
-        if !name.is_empty() {
-            break;
-        }
     }
+    Ok((String::new(), false))
+}
+
+fn probe(info: &DeviceInfo) -> Result<(Option<u8>, String, bool), HardwareError> {
+    let link = KzziLink::open(&info.path().to_string_lossy())?;
+    let (name, private) = identify(&link)?;
+    if private {
+        return Ok((None, name, true));
+    }
+    let mut buffer = [0u8; 64];
     for _ in 0..3 {
         link.drain();
         link.send(&protocol::kzzi_request(0x4a))?;

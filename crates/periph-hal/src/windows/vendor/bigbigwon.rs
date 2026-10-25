@@ -37,6 +37,24 @@ impl VendorAdapter for BigbigwonGamepad {
             Err(error) => Outcome::failure(error),
         }
     }
+
+    fn discover(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
+        match open_pair(api, info) {
+            Ok((reader, writer)) => {
+                let uid = gamepad_uid(&reader, &writer);
+                vec![Outcome {
+                    connection: if uid.is_empty() {
+                        Connection::Unknown
+                    } else {
+                        Connection::Connected
+                    },
+                    uid,
+                    ..Outcome::default()
+                }]
+            }
+            Err(error) => vec![Outcome::failure(error)],
+        }
+    }
 }
 
 fn probe(api: &HidApi, info: &DeviceInfo) -> Result<(Option<u8>, String), HardwareError> {

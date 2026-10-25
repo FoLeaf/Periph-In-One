@@ -172,8 +172,8 @@ fn reliable_identity_can_join_sources_and_keeps_independent_routes() {
         &[],
         &snapshot(
             vec![
-                device("one", "a", "shared", ""),
-                device("two", "b", "shared", ""),
+                device("one", "a", "shared", "shared-sn"),
+                device("two", "b", "shared", "shared-sn"),
             ],
             &["one", "two"],
         ),
@@ -181,6 +181,7 @@ fn reliable_identity_can_join_sources_and_keeps_independent_routes() {
     assert_eq!(first.devices.len(), 1);
     assert_eq!(first.bindings.len(), 2);
     assert_eq!(first.devices[0].saved.routes.len(), 2);
+    assert!(!first.devices[0].saved.identity_conflict);
     let mut update = snapshot(vec![device("two", "b", "shared", "")], &["two"]);
     update.failures.push(BackendFailure {
         backend: "one".into(),
@@ -283,4 +284,33 @@ fn offline_deletion_and_explicit_remark_rebinding_keep_their_guards() {
     assert_eq!(records[1].saved.alias, "Move me");
     model::remove_offline(&mut records, &a).unwrap();
     assert_eq!(records.len(), 1);
+}
+
+#[test]
+fn joined_sources_preserve_roles_and_uncertain_connection() {
+    let mut camera = device("camera", "a", "shared", "");
+    camera.connection = Connection::Unknown;
+    camera.descriptor.roles = vec!["video.capture".into()];
+    let mut audio = device("audio", "b", "shared", "");
+    audio.connection = Connection::Disconnected;
+    audio.descriptor.roles = vec!["audio.input".into()];
+    let joined = model::merge_snapshot(&[], &snapshot(vec![camera, audio], &["camera", "audio"]));
+    assert_eq!(joined.devices.len(), 1);
+    assert!(
+        joined.devices[0]
+            .saved
+            .descriptor
+            .roles
+            .iter()
+            .any(|role| role == "video.capture")
+    );
+    assert!(
+        joined.devices[0]
+            .saved
+            .descriptor
+            .roles
+            .iter()
+            .any(|role| role == "audio.input")
+    );
+    assert_eq!(joined.devices[0].connection, Connection::Unknown);
 }

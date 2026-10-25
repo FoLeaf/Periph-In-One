@@ -12,8 +12,8 @@ pub mod protocol;
 
 pub use capability::{Capabilities, Capability, CapabilityDescriptor};
 pub use device::{
-    Connection, Device, DeviceDescriptor, DeviceKey, HardwareIdentifier, Identity, IdentityKind,
-    Link,
+    Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, HardwareIdentifier, Identity,
+    IdentityKind, Link,
 };
 pub use error::{ErrorKind, HardwareError};
 pub use hardware::{Backend, BackendFailure, Hardware, Inventory, Snapshot};

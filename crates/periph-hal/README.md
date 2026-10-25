@@ -1,10 +1,10 @@
 # periph-hal
 
-独立的 Rust 外设访问库。设备发现与能力契约不依赖 Slint、应用配置、备注或历史记录。首期提供 Windows HID 和经典蓝牙系统属性后端，具体协议编解码复用原项目实现。
+独立的 Rust 外设访问库。设备核心只包含描述、带命名空间的身份证据、连接和类型化能力；不依赖 Slint、应用配置、备注或电量历史。已提供 Windows HID 和经典蓝牙系统属性后端，协议编解码复用原项目实现。
 
-## 使用现有后端
+## 发现与能力读取
 
-Windows 应用启用 `windows-backend` feature；默认 features 为空，便于单独使用公共契约或实现其他平台后端。
+Windows 应用启用 `windows-backend`。默认 features 为空；需要序列化通用描述时启用可选 `serde`。
 
 ```toml
 [dependencies]
@@ -12,58 +12,80 @@ periph-hal = { path = "path/to/periph-hal", features = ["windows-backend"] }
 ```
 
 ```rust
-use periph_hal::{Hardware, battery::BatteryState};
+use periph_hal::{Connection, Hardware, battery::{Battery, BatteryState}};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hardware = Hardware::system()?;
-    let snapshot = hardware.scan();
-    for device in snapshot.devices {
-        if let Some(BatteryState::Value(sample)) =
-            device.capabilities.get::<BatteryState>("main")
-        {
-            println!("{}: {}%", device.descriptor.name, sample.level.get());
+    let discovered = hardware.discover(); // 不采样电量
+    for mut device in discovered.devices {
+        let Some(battery) = device.capabilities.get::<Battery>("main") else {
+            continue; // 设备不必具有电量能力
+        };
+        match battery.read() { // 调用方明确选择要读取的能力
+            Ok(reading) => {
+                reading.facts.apply_to(&mut device);
+                if let BatteryState::Value(sample) = reading.state
+                    && device.connection == Connection::Connected
+                {
+                    println!("{}: {}%", device.descriptor.name, sample.level.get());
+                }
+            }
+            Err(error) => eprintln!("battery: {error}"),
         }
     }
-    for failure in snapshot.failures {
+    for failure in discovered.failures {
         eprintln!("{}: {}", failure.backend, failure.error);
     }
     Ok(())
 }
 ```
 
-`Hardware::system()` 在没有可用平台后端时返回 Unsupported，不将空列表伪装成枚举成功。非 Windows 应用可以实现 `Backend` 并通过 `Hardware::register` 使用相同接口。`Backend` 的对象和原生资源留在所属工作线程，不要求原生句柄跨线程。
+`inventory()` 只被动枚举元数据；`discover()` 允许识别身份和接收器拓扑，但不发送电量查询，也不读取蓝牙电量属性。它返回可调用的能力客户端。`Battery::read()` 每次执行一次独立读取，返回电量结果和本次操作建立的通用设备事实。电量失败本身不能推导设备离线。
 
-## 扩展方式
+没有平台后端时 `Hardware::system()` 返回 Unsupported；其他平台可实现 `Backend` 并注册，应用复用相同接口。后端和原生资源留在所属工作线程，不要求原生句柄跨线程。同步发现仍按注册顺序执行，目前不提供推送发现或并行调度。
+
+## 能力生命周期
+
+电量客户端的契约为 `power.battery` v2。创建客户端不采样，重复读取不需要重新发现。`close()`、所属后端下一次发现（包括发现失败）、Hardware 销毁，都会使旧客户端及其克隆失效；失效后的读取在执行 I/O 前返回 Unavailable。
+
+`Battery` 串行处理同一客户端的操作；Windows HID 同一接收器的不同槽位还共享访问锁，避免交叉发送和抢应答。重新发现会等待已进入的同步读取完成；这不代表能够强制取消 Windows 同步调用。端点已消失或可验证的身份发生变化时拒绝读取；没有本体身份的协议无法保证识别两次发现之间发生的重新配对。
+
+新领域的实时客户端应通过 `Capability::invalidate` 实现自己的关闭和失效语义。不可变描述或状态可以使用默认实现。连续音视频、笔输入及长任务使用领域专用会话与有界通道，不通过设备发现快照传输大块数据。
+
+## 扩展
 
 | 扩展 | 改动 |
 | --- | --- |
-| 同一 HID 协议新增型号 | 私有驱动中的 matcher / 型号数据和对应测试 |
-| 新 HID 协议 | `src/windows/vendor/` 的薄驱动、`src/protocol.rs` 的纯编解码、私有驱动注册 |
-| 新访问方式或操作系统 | 实现 `Backend`，返回公共描述和能力；应用启动时注册 |
-| 新领域能力 | 在独立模块或下游 crate 实现 `Capability`，提供强类型状态或客户端，注册到目标组件 |
+| 同一 HID 协议新增型号 | 私有驱动 matcher / 型号数据和测试 |
+| 新 HID 协议 | 驱动、共享纯编解码、驱动注册；分别实现身份/拓扑发现和能力读取 |
+| 新访问方式或操作系统 | 实现 `Backend::inventory` / `discover`，提供相应类型的能力客户端 |
+| 新能力 | 下游模块实现 `Capability`，通过组件键注册；领域服务按强类型接口调用 |
 
-`tests/portable.rs` 在库外定义了摄像头能力和后端。它无需增加核心枚举成员、导入电量模块或修改已有能力。设备角色是可扩展标签，不决定能力；无电池设备无需提供 BatteryState。
+`tests/portable.rs` 在库外定义摄像头能力，`tests/capabilities.rs` 用计数后端验证发现零采样、独立读取和客户端失效。无需扩充核心设备枚举或修改已有领域契约；这些测试不代表已经实现真实摄像头。
 
-公共 `Device` 仅包含描述、连接、能力集合和结构化错误。`Capabilities` 内部用标准库 Any 隐藏类型，业务只使用 `insert::<T>` / `get::<T>`，不直接接触 Any、字符串命令或任意 JSON。每个组件、契约 ID 和版本只允许一个实现；同设备的多来源融合由应用选择策略。
+`Capabilities` 的内部类型擦除只使用标准库。调用方使用 `insert::<T>` / `get::<T>`，不操作 Any、字符串命令或任意 JSON；每个组件、契约 ID 和版本只允许一个实例。
 
-能力值可以是本轮观测，也可以是领域定义的客户端。当前电量使用观测 `BatteryState`；未来命令、订阅、音视频或笔输入可使用各自类型的客户端和专用会话，核心不预建空接口，也不通过快照通道传递媒体帧。`Backend::scan` 目前是同步轮询接口，按注册顺序调用，不提供并行调度或强制中断同步系统调用。
+## 身份、事实与业务边界
 
-## 事实与业务边界
+- `DeviceKey` 是带来源作用域的访问路由。永久记录 ID、备注与多来源合并由应用决定。
+- `Identity` 有命名空间及主体；`DeviceDescriptor.target` 限定共享接收器下的逻辑目标。接收器序列号不冒充本体 UID，USB VID 和蓝牙 company ID 不属于同一编号体系。
+- 角色是可扩展标签，硬件标识可为空；没有电池的设备无需注册电量客户端。
+- `BatteryReading.facts` 提供操作确认的连接、名称和身份，应用决定如何归并。设备核心不保存电量数据，电量历史由独立领域服务管理。
+- 百分比支持 0..=100；特定协议用零表示未知时，由协议解析器处理。缺读数、不支持和读取错误独立表达。
+- 观察时间与设备采样时间分别记录；系统缓存不冒充刚采样的数据。蓝牙读取使用 SystemCache。
+- 发现结果区分已完成和失败来源。应用不能用失败或未覆盖来源的缺席结果确认离线。
 
-- `DeviceKey` 是带来源作用域的访问路由，不能直接当成永久设备身份。身份凭据带命名空间和主体，接收器序列号不等于槽内外设 UID。
-- HAL 的 HID 槽位路由始终包含槽号；当前应用在 `src/hardware.rs` 中兼容旧版单设备记录键。旧配置及备注合并仍由应用负责。
-- `Connection` 和电量结果独立。超时、缺属性与不支持是不同状态；缓存电量不能证明设备在线。
-- 百分比支持 0..=100；特定协议若用零表示未知，由该协议解析器处理。
-- `Sample.observed_at` 是读取时间，`sampled_at` 缺失时不声称知道设备采样时间。Windows 蓝牙属性使用 SystemCache 来源。
-- 一个后端失败不丢弃其他后端结果。`Snapshot.completed` 只列举成功完成的后端；应用不得把失败后端的旧记录当作已确认离线。
-- 当前没有 Linux/macOS 驱动、GATT 后端、真实摄像头或音视频实现。可移植性指公共库和后端接口能在非 Windows 编译并被替换，不意味着已有跨平台硬件支持。
+当前应用已经直接使用通用描述及身份证据。配置 v1 的旧格式知识仅位于 `src/migration.rs`；迁移至 v2 时保留记录 ID、备注和历史，首次保存备份原文件。应用不再通过旧 Reading 转换层或蓝牙路径前缀判定设备。
+
+当前没有 Linux/macOS 驱动、GATT 后端或真实媒体实现。可移植性检查证明公共库及其接口可在非 Windows 编译并替换后端，不代表已有跨平台真机支持。
 
 ## 检查
 
 ```text
 cargo test -p periph-hal --no-default-features --locked --all-targets
+cargo test -p periph-hal --no-default-features --features serde --locked --all-targets
 cargo test --workspace --locked --all-targets
 cargo clippy --workspace --locked --all-targets -- -D warnings
 ```
 
-`diagnostics` feature 仅供原始协议探针使用，公开独立的 Windows 专用辅助入口；应用正常运行不依赖它。协议构造器仍通过 `protocol` 共享，避免探针与真实驱动复制报文代码。
+`diagnostics` feature 仅供原始 Windows 协议探针使用，正常应用不依赖它；探针与驱动共享 `protocol` 构造器。

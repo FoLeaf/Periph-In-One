@@ -1,7 +1,7 @@
 use periph_hal::{
     Backend, Capabilities, Capability, Connection, Device, DeviceDescriptor, DeviceKey, ErrorKind,
     Hardware, HardwareError,
-    battery::{BatteryState, Percent},
+    battery::{Battery, BatteryState, Percent},
 };
 
 // Deliberately defined downstream: adding a domain must not edit HAL enums.
@@ -36,7 +36,7 @@ impl Backend for Camera {
     fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError> {
         Ok(vec![descriptor()])
     }
-    fn scan(&mut self) -> Result<Vec<Device>, HardwareError> {
+    fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
         let mut capabilities = Capabilities::default();
         capabilities.insert("sensor", CameraControl { exposure: 12 })?;
         Ok(vec![Device {
@@ -56,7 +56,7 @@ impl Backend for Broken {
     fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError> {
         Err(HardwareError::new(ErrorKind::PermissionDenied, "denied"))
     }
-    fn scan(&mut self) -> Result<Vec<Device>, HardwareError> {
+    fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
         Err(HardwareError::new(
             ErrorKind::Transport,
             "disconnected source",
@@ -68,7 +68,7 @@ impl Backend for Broken {
 fn downstream_domain_needs_neither_battery_nor_core_changes() {
     let mut hardware = Hardware::new();
     hardware.register(Camera).unwrap();
-    let snapshot = hardware.scan();
+    let snapshot = hardware.discover();
     let device = &snapshot.devices[0];
     assert_eq!(
         device
@@ -78,7 +78,7 @@ fn downstream_domain_needs_neither_battery_nor_core_changes() {
             .exposure,
         12
     );
-    assert!(device.capabilities.get::<BatteryState>("main").is_none());
+    assert!(device.capabilities.get::<Battery>("main").is_none());
     assert_eq!(device.descriptor.roles, ["video.capture"]);
 }
 
@@ -87,7 +87,7 @@ fn failed_backend_does_not_hide_success_or_claim_complete_inventory() {
     let mut hardware = Hardware::new();
     hardware.register(Broken).unwrap();
     hardware.register(Camera).unwrap();
-    let snapshot = hardware.scan();
+    let snapshot = hardware.discover();
     assert_eq!(snapshot.devices.len(), 1);
     assert_eq!(snapshot.completed, ["fake.camera"]);
     assert_eq!(snapshot.failures[0].backend, "fake.broken");

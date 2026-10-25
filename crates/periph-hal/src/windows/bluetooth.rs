@@ -7,9 +7,9 @@
 //! devices are listed.
 
 use crate::{
-    Capabilities, Connection, Device, DeviceDescriptor, DeviceKey, ErrorKind, HardwareError,
-    HardwareIdentifier, Identity, IdentityKind, Link,
-    battery::{BatteryState, Percent, Sample, SampleOrigin},
+    Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind,
+    HardwareError, HardwareIdentifier, Identity, IdentityKind, Link,
+    battery::{Battery, BatteryReading, BatteryState, Percent, Sample, SampleOrigin},
     windows::wide,
 };
 use std::time::SystemTime;
@@ -126,7 +126,9 @@ fn battery_value(bytes: &[u8]) -> Option<u8> {
     }
 }
 
-pub fn audio_devices() -> Result<Vec<Device>, HardwareError> {
+fn collect(
+    battery_for: Option<&str>,
+) -> Result<Vec<(DeviceDescriptor, Connection, Option<u8>)>, HardwareError> {
     /// A remote device node ("BTHENUM\DEV_…") or a battery-carrying service
     /// child of one, both identified by the shared Bluetooth MAC address.
     struct BtNode {
@@ -189,8 +191,12 @@ pub fn audio_devices() -> Result<Vec<Device>, HardwareError> {
                 continue;
             };
             let is_device = instance.starts_with("BTHENUM\\DEV_");
-            let battery = device_property(set, &data, &BLUETOOTH_BATTERY_KEY, DEVPROP_TYPE_BYTE)
-                .and_then(|bytes| battery_value(&bytes));
+            let battery = if battery_for.is_some_and(|wanted| wanted == format!("bt:{address}")) {
+                device_property(set, &data, &BLUETOOTH_BATTERY_KEY, DEVPROP_TYPE_BYTE)
+                    .and_then(|bytes| battery_value(&bytes))
+            } else {
+                None
+            };
             match nodes
                 .iter_mut()
                 .find(|node| node.address == address && node.is_device == is_device)
@@ -249,22 +255,8 @@ pub fn audio_devices() -> Result<Vec<Device>, HardwareError> {
                 .filter(|node| !node.is_device && node.address == device.address)
                 .find_map(|node| node.battery)
                 .or(device.battery);
-            let mut capabilities = Capabilities::default();
-            let battery = match battery {
-                Some(level) => BatteryState::Value(Sample {
-                    level: Percent::new(level)?,
-                    origin: SampleOrigin::SystemCache,
-                    observed_at: SystemTime::now(),
-                    sampled_at: None,
-                }),
-                None => BatteryState::Unavailable(HardwareError::new(
-                    ErrorKind::Unavailable,
-                    "Windows has no battery property",
-                )),
-            };
-            capabilities.insert("main", battery)?;
-            Ok(Device {
-                descriptor: DeviceDescriptor {
+            Ok((
+                DeviceDescriptor {
                     key: DeviceKey {
                         backend: "windows.bluetooth.audio".into(),
                         local: format!("bt:{}", device.address),
@@ -293,14 +285,71 @@ pub fn audio_devices() -> Result<Vec<Device>, HardwareError> {
                     }],
                     target: String::new(),
                 },
-                connection: device.connection,
+                device.connection,
+                battery,
+            ))
+        })
+        .collect()
+}
+
+pub fn inventory() -> Result<Vec<DeviceDescriptor>, HardwareError> {
+    collect(None).map(|devices| {
+        devices
+            .into_iter()
+            .map(|(descriptor, _, _)| descriptor)
+            .collect()
+    })
+}
+
+pub fn discover() -> Result<Vec<Device>, HardwareError> {
+    collect(None)?
+        .into_iter()
+        .map(|(descriptor, connection, _)| {
+            let key = descriptor.key.local.clone();
+            let mut capabilities = Capabilities::default();
+            capabilities.insert(
+                "main",
+                Battery::new(move || {
+                    let (descriptor, connection, level) = collect(Some(&key))?
+                        .into_iter()
+                        .find(|(descriptor, _, _)| descriptor.key.local == key)
+                        .ok_or_else(|| {
+                            HardwareError::new(
+                                ErrorKind::Unavailable,
+                                "Bluetooth device disappeared",
+                            )
+                        })?;
+                    let state = match level {
+                        Some(level) => BatteryState::Value(Sample {
+                            level: Percent::new(level)?,
+                            origin: SampleOrigin::SystemCache,
+                            observed_at: SystemTime::now(),
+                            sampled_at: None,
+                        }),
+                        None => BatteryState::Unavailable(HardwareError::new(
+                            ErrorKind::Unavailable,
+                            "Windows has no battery property",
+                        )),
+                    };
+                    Ok(BatteryReading {
+                        state,
+                        facts: DeviceFacts {
+                            connection: Some(connection),
+                            name: (!descriptor.name.is_empty()).then_some(descriptor.name),
+                            identities: descriptor.identities,
+                        },
+                    })
+                }),
+            )?;
+            Ok(Device {
+                descriptor,
+                connection,
                 capabilities,
                 issue: None,
             })
         })
         .collect()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

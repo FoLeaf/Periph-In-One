@@ -34,6 +34,13 @@ impl Outcome {
 pub trait VendorAdapter {
     fn matches(&self, info: &DeviceInfo) -> bool;
     fn kind(&self) -> &'static str;
+    /// Identify topology/identity only. Battery queries belong to read_target.
+    fn discover(&self, _api: &HidApi, _info: &DeviceInfo) -> Vec<Outcome> {
+        vec![Outcome::default()]
+    }
+    fn read_target(&self, api: &HidApi, info: &DeviceInfo, _slot: Option<u8>) -> Outcome {
+        self.read(api, info)
+    }
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome;
     fn read_all(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
         vec![self.read(api, info)]

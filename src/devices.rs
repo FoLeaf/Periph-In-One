@@ -31,7 +31,7 @@ pub fn enumerate_identifiers() -> Result<Vec<InventoryEntry>, String> {
 }
 
 pub fn refresh(hardware: &mut Hardware) -> ScanReport {
-    hardware::from_snapshot(hardware.scan())
+    hardware::from_snapshot(hardware.discover())
 }
 
 pub fn scan() -> Result<ScanReport, String> {

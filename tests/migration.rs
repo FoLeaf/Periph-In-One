@@ -78,7 +78,11 @@ fn v1_single_receiver_slot_is_normalized_only_during_migration() {
 fn corrupt_or_unknown_configuration_is_never_overwritten() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings.json");
-    for bytes in [b"{broken".as_slice(), b"{\"version\":999}".as_slice()] {
+    for bytes in [
+        b"{broken".as_slice(),
+        b"{\"version\":999}".as_slice(),
+        b"{\"version\":\"2\"}".as_slice(),
+    ] {
         std::fs::write(&path, bytes).unwrap();
         assert!(Config::load(&path).is_err());
         assert!(Config::default().save(&path).is_err());

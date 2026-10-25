@@ -18,8 +18,8 @@ impl Backend for HidBackend {
     fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError> {
         hid::inventory()
     }
-    fn scan(&mut self) -> Result<Vec<Device>, HardwareError> {
-        hid::scan()
+    fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
+        hid::discover()
     }
 }
 
@@ -29,10 +29,9 @@ impl Backend for BluetoothAudioBackend {
         "windows.bluetooth.audio"
     }
     fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError> {
-        bluetooth::audio_devices()
-            .map(|devices| devices.into_iter().map(|d| d.descriptor).collect())
+        bluetooth::inventory()
     }
-    fn scan(&mut self) -> Result<Vec<Device>, HardwareError> {
-        bluetooth::audio_devices()
+    fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
+        bluetooth::discover()
     }
 }

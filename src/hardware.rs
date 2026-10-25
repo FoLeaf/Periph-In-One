@@ -3,7 +3,10 @@ use crate::{
     battery::{Batteries, Observation},
     model::{self, Device},
 };
-use periph_hal::{Capability, Snapshot, battery::BatteryState};
+use periph_hal::{
+    Capability, Snapshot,
+    battery::{Battery, BatteryState},
+};
 
 #[derive(Debug)]
 pub struct ScanReport {
@@ -11,25 +14,42 @@ pub struct ScanReport {
     pub batteries: Vec<Observation>,
 }
 
-pub fn from_snapshot(snapshot: Snapshot) -> ScanReport {
+/// Explicit application workflow: discover first, then invoke only the battery
+/// capability. Other applications can choose entirely different capabilities.
+pub fn from_snapshot(mut snapshot: Snapshot) -> ScanReport {
     let batteries = snapshot
         .devices
-        .iter()
+        .iter_mut()
         .flat_map(|device| {
-            device
+            let components: Vec<_> = device
                 .capabilities
                 .descriptors()
-                .filter(|capability| capability.id == BatteryState::ID)
-                .filter_map(|capability| {
-                    device
-                        .capabilities
-                        .get::<BatteryState>(&capability.component)
-                        .map(|state| Observation {
-                            key: device.descriptor.key.clone(),
-                            component: capability.component.clone(),
-                            state: state.clone(),
-                        })
+                .filter(|capability| {
+                    capability.id == Battery::ID && capability.version == Battery::VERSION
                 })
+                .map(|capability| capability.component.clone())
+                .collect();
+            components
+                .into_iter()
+                .filter_map(|component| {
+                    let battery = device.capabilities.get::<Battery>(&component)?.clone();
+                    let state = match battery.read() {
+                        Ok(reading) => {
+                            reading.facts.apply_to(device);
+                            reading.state
+                        }
+                        Err(error) => {
+                            device.issue = Some(error.clone());
+                            BatteryState::Unavailable(error)
+                        }
+                    };
+                    Some(Observation {
+                        key: device.descriptor.key.clone(),
+                        component,
+                        state,
+                    })
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     ScanReport {
