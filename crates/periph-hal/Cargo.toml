@@ -1,0 +1,11 @@
+[package]
+name = "periph-hal"
+version = "0.1.0"
+edition = "2024"
+description = "Protocol-independent peripheral discovery and capability contracts"
+license = "MIT"
+publish = false
+
+[features]
+default = []
+
