@@ -11,7 +11,7 @@
 
 **Periph In One** 是面向 Windows 10/11 x64 的便携外设电量工具。把支持的 2.4G 接收器接到电脑，即可在一个面板里查看电量；收起窗口后，从系统托盘随时唤出。
 
-Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当前版本 **0.21.0**。
+Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当前版本 **0.22.0**。
 
 ## 界面一览
 
@@ -91,7 +91,7 @@ cargo test --workspace --locked --all-targets
 .\scripts\package.ps1
 ```
 
-生成 `dist/periph-in-one-0.21.0-windows-x64.zip`，包含程序、文档、图片、校验和与依赖许可，不包含本机配置。默认从 `target/release/` 取程序，可通过 `-Executable` 指定其他构建路径；已有同名 ZIP 时会拒绝覆盖。
+生成 `dist/periph-in-one-0.22.0-windows-x64.zip`，包含程序、文档、图片、校验和与依赖许可，不包含本机配置。默认从 `target/release/` 取程序，可通过 `-Executable` 指定其他构建路径；已有同名 ZIP 时会拒绝覆盖。
 
 GitHub Actions 在分支 push / PR 时执行格式、Windows MSVC 测试、Clippy、Release 构建和打包，产物保留 14 天。推送与 Cargo 版本一致的 `v*` 标签会复用完整检查，生成附带 ZIP 和 SHA256 的 Release 草稿，真机验收后手动公开。详见 [CI / CD 流程](.github/CICD.md)。Windows 10、多屏和不同 DPI 场景仍需要真机验证。
 
