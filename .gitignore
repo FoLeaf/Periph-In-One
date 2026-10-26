@@ -7,6 +7,7 @@ __pycache__/
 /docs/*
 !/docs/ADAPTATION.md
 !/docs/HARDWARE-ARCHITECTURE.md
+!/docs/OTA-UPDATE.md
 /agents.md
 /AGENTS.md
 /scripts/*
