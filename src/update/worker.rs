@@ -191,6 +191,10 @@ fn status(
 fn pending(state: &State) -> bool {
     state.transaction.as_ref().is_some_and(|t| {
         t.phase == Phase::Verified
+            && state
+                .release
+                .as_ref()
+                .is_some_and(|release| release.version == t.manifest.version)
             && t.manifest.version
                 > env!("CARGO_PKG_VERSION")
                     .parse::<Version>()
@@ -339,6 +343,9 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                             // Reload after locking: another process or recovery may have committed.
                             state = storage::read(&storage::state_path(&root))?;
                             if prepare {
+                                if !pending(&state) {
+                                    return Err("更新尚未就绪".to_string().into());
+                                }
                                 let transaction = state
                                     .transaction
                                     .as_ref()
@@ -353,20 +360,27 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                 {
                                     return Err("此更新已撤回".to_string().into());
                                 }
-                                validate_cached(&root, transaction, schema, host)?;
+                                if let Err(error) =
+                                    validate_cached(&root, transaction, schema, host)
+                                {
+                                    if matches!(error, package::StageError::Untrusted(_)) {
+                                        state.rejected.push(transaction.manifest.version.clone());
+                                        state.transaction = None;
+                                        state.release = None;
+                                        (host.emit)(Event::Release(None));
+                                    }
+                                    return Err(error.to_string().into());
+                                }
                                 if stop.load(Ordering::Acquire) {
                                     return Err("更新已取消".to_string().into());
                                 }
                                 (host.emit)(Event::Prepared(Box::new(transaction.clone())));
                                 return Ok(());
                             }
-                            if pending(&state) {
-                                return Ok(());
-                            }
                             if state
                                 .transaction
                                 .as_ref()
-                                .is_some_and(|t| t.phase == Phase::Verified)
+                                .is_some_and(|t| t.phase == Phase::Verified && !pending(&state))
                             {
                                 state.transaction = None;
                             }
@@ -578,7 +592,7 @@ pub fn validate_cached(
     transaction: &Transaction,
     schema: u32,
     host: Host,
-) -> Result<(), String> {
+) -> Result<(), package::StageError> {
     let directory = storage::transaction_path(root, &transaction.id)?;
     super::transaction::plain(root, &directory)?;
     let expected_name = format!(
@@ -590,7 +604,8 @@ pub fn validate_cached(
     {
         return Err("缓存的更新包校验失败".into());
     }
-    let check_directory = tempfile::tempdir_in(&directory).map_err(|_| "更新目录不可写")?;
+    let check_directory =
+        tempfile::tempdir_in(&directory).map_err(|_| "更新目录不可写".to_string())?;
     let check = check_directory.path().join("verified");
     let manifest = package::stage(
         &directory.join(expected_name),
@@ -615,6 +630,7 @@ pub fn validate_cached(
         }
     }
     (host.probe)(&directory.join("staged/periph-in-one.exe"), &manifest)
+        .map_err(package::StageError::Unavailable)
 }
 
 #[cfg(test)]

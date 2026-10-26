@@ -72,7 +72,7 @@ pub fn payload_path(path: &str) -> bool {
                 && !part.ends_with(' ')
                 && part
                     .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"-_. ".contains(&c))
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_. +".contains(&c))
                 && !matches!(
                     part.split('.')
                         .next()

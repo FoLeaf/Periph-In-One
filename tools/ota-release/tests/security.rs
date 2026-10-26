@@ -33,6 +33,9 @@ fn manifest() -> Manifest {
 fn rejects_replay_prerelease_wrong_platform_schema_and_windows_path_aliases() {
     let floor = "0.22.0".parse().unwrap();
     manifest().validate(&floor, 2).unwrap();
+    assert!(package::payload_path(
+        "licenses/dependencies/toml-1.1.8+spec-1.1.0/LICENSE-APACHE"
+    ));
     for version in ["0.22.0", "0.21.0", "0.23.0-beta.1", "0.23.0+build"] {
         let mut m = manifest();
         m.version = version.parse().unwrap();
