@@ -17,7 +17,23 @@ fn main() {
         }
         return;
     }
+    match platform::update::before_start() {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            if std::env::args().any(|arg| arg == "--ota-resume") {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            platform::error_dialog(&error);
+            return;
+        }
+    }
     if let Err(error) = app::run() {
+        if std::env::args().any(|arg| arg == "--ota-resume") {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
         platform::error_dialog(&error);
     }
 }

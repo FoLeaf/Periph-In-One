@@ -2,7 +2,7 @@ use super::{
     MAX_EXPANDED, MAX_PACKAGE,
     package::{self, Manifest},
     scheduler,
-    storage::{self, Phase, Preferences, State, Transaction},
+    storage::{self, Phase, Preferences, ReleaseInfo, State, Transaction},
 };
 use semver::Version;
 use serde::Deserialize;
@@ -36,6 +36,12 @@ pub enum Event {
         ready: bool,
     },
     Prepared(Box<Transaction>),
+    PreparationFailed(String),
+    Release(Option<Box<ReleaseInfo>>),
+    Preference {
+        automatic: bool,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -48,11 +54,19 @@ pub struct Host {
 pub struct Controller {
     sender: Sender<Command>,
     cancelled: Arc<AtomicBool>,
+    preferences: Option<Sender<bool>>,
+    preference_writer: Option<thread::JoinHandle<()>>,
 }
 impl Controller {
     pub fn send(&self, command: Command) {
         if matches!(command, Command::Automatic(false) | Command::Stop) {
             self.cancelled.store(true, Ordering::Release);
+        }
+        if let Command::Automatic(enabled) = command {
+            if let Some(preferences) = &self.preferences {
+                let _ = preferences.send(enabled);
+            }
+            return;
         }
         let _ = self.sender.send(command);
     }
@@ -60,6 +74,10 @@ impl Controller {
 impl Drop for Controller {
     fn drop(&mut self) {
         self.send(Command::Stop);
+        self.preferences.take();
+        if let Some(writer) = self.preference_writer.take() {
+            let _ = writer.join();
+        }
     }
 }
 
@@ -82,7 +100,10 @@ struct Sink<'a, W> {
 impl<W: Write> Write for Sink<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.cancelled.load(Ordering::Acquire) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "cancelled",
+            ));
         }
         self.output.write(bytes)
     }
@@ -120,6 +141,7 @@ struct Release {
     draft: bool,
     prerelease: bool,
     assets: Vec<Asset>,
+    body: Option<String>,
 }
 #[derive(Deserialize)]
 struct Asset {
@@ -139,7 +161,11 @@ fn release(id: Option<u64>, cancelled: &AtomicBool) -> Result<Release, Failure> 
             output: &mut bytes,
             cancelled,
         })?;
-    let release: Release = serde_json::from_slice(&bytes)
+    decode_release(&bytes)
+}
+
+fn decode_release(bytes: &[u8]) -> Result<Release, Failure> {
+    let release: Release = serde_json::from_slice(bytes)
         .map_err(|_| Failure::from("更新源返回无效数据".to_string()))?;
     if release.draft || release.prerelease {
         return Err("未找到正式发布的更新".to_string().into());
@@ -158,15 +184,57 @@ fn status(
         message: message.into(),
         working,
         automatic: preferences.automatic,
-        ready: state
-            .transaction
-            .as_ref()
-            .is_some_and(|t| t.phase == Phase::Verified),
+        ready: pending(state),
     });
+}
+
+fn pending(state: &State) -> bool {
+    state.transaction.as_ref().is_some_and(|t| {
+        t.phase == Phase::Verified
+            && t.manifest.version
+                > env!("CARGO_PKG_VERSION")
+                    .parse::<Version>()
+                    .expect("Cargo version")
+    })
 }
 
 pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, String> {
     let (sender, receiver) = mpsc::channel();
+    let (preferences, requests) = mpsc::channel::<bool>();
+    let preference_root = root.clone();
+    let command_sender = sender.clone();
+    // Preference writes never wait behind a stalled network request. Shutdown
+    // joins this short FIFO writer so disabling updates survives an immediate quit.
+    let preference_writer = thread::Builder::new()
+        .name("ota-preferences".into())
+        .spawn(move || {
+            let path = storage::preferences_path(&preference_root);
+            let mut saved = storage::read::<Preferences>(&path).ok();
+            for enabled in requests {
+                let next = Preferences { automatic: enabled };
+                let result = if saved.is_none() {
+                    Err("无法读取更新设置，请保留原文件".into())
+                } else {
+                    super::transaction::plain(&preference_root, &path)
+                        .and_then(|_| storage::write(&path, &next))
+                };
+                match result {
+                    Ok(()) => {
+                        saved = Some(next);
+                        (host.emit)(Event::Preference {
+                            automatic: enabled,
+                            error: None,
+                        });
+                        let _ = command_sender.send(Command::Automatic(enabled));
+                    }
+                    Err(error) => (host.emit)(Event::Preference {
+                        automatic: saved.as_ref().is_some_and(|p| p.automatic),
+                        error: Some(error),
+                    }),
+                }
+            }
+        })
+        .map_err(|_| "无法启动更新设置服务")?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let stop = cancelled.clone();
     thread::Builder::new()
@@ -197,17 +265,27 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                 host,
                 &preferences,
                 &state,
-                if state
+                if pending(&state) {
+                    "更新已就绪"
+                } else if state
                     .transaction
                     .as_ref()
-                    .is_some_and(|t| t.phase == Phase::Verified)
+                    .is_some_and(|t| t.phase == Phase::RolledBack)
                 {
-                    "更新已就绪"
+                    "上次更新未成功，已恢复旧版本"
                 } else {
                     ""
                 },
                 false,
             );
+            let current: Version = env!("CARGO_PKG_VERSION").parse().expect("Cargo version");
+            (host.emit)(Event::Release(
+                state
+                    .release
+                    .clone()
+                    .filter(|r| r.version > current && !state.rejected.contains(&r.version))
+                    .map(Box::new),
+            ));
             loop {
                 let command = match receiver.recv_timeout(Duration::from_secs(1)) {
                     Ok(command) => command,
@@ -222,18 +300,22 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                 match command {
                     Command::Stop => break,
                     Command::Automatic(enabled) => {
-                        let next = Preferences { automatic: enabled };
-                        match storage::write(&storage::preferences_path(&root), &next) {
-                            Ok(()) => {
-                                preferences = next;
-                                state.next_check = now() + scheduler::FIRST_CHECK.as_secs();
-                                status(host, &preferences, &state, "", false);
-                            }
-                            Err(error) => status(host, &preferences, &state, error, false),
-                        }
+                        preferences.automatic = enabled;
+                        state.next_check = now() + scheduler::FIRST_CHECK.as_secs();
+                        status(host, &preferences, &state, "", false);
                     }
                     Command::Check | Command::Prepare => {
                         let prepare = matches!(command, Command::Prepare);
+                        if now() < state.retry_after {
+                            status(
+                                host,
+                                &preferences,
+                                &state,
+                                "更新服务繁忙，请稍后重试",
+                                false,
+                            );
+                            continue;
+                        }
                         stop.store(false, Ordering::Release);
                         status(
                             host,
@@ -278,14 +360,18 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                 (host.emit)(Event::Prepared(Box::new(transaction.clone())));
                                 return Ok(());
                             }
+                            if pending(&state) {
+                                return Ok(());
+                            }
                             if state
                                 .transaction
                                 .as_ref()
                                 .is_some_and(|t| t.phase == Phase::Verified)
                             {
-                                return Ok(());
+                                state.transaction = None;
                             }
                             let keys = super::trusted_keys()?;
+                            super::transaction::cleanup(&root, &state);
                             let remote = release(None, &stop)?;
                             let current = Version::parse(env!("CARGO_PKG_VERSION"))
                                 .map_err(|e| e.to_string())?;
@@ -301,13 +387,23 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                     .ok_or_else(|| Failure::from("更新版本无效".to_string()))?,
                             )
                             .map_err(|e| e.to_string())?;
+                            if state.rejected.contains(&candidate) {
+                                return Err("此版本更新未通过验证，请等待后续版本"
+                                    .to_string()
+                                    .into());
+                            }
                             if candidate <= *floor
                                 || !candidate.pre.is_empty()
                                 || !candidate.build.is_empty()
-                                || state.rejected.contains(&candidate)
                             {
                                 return Ok(());
                             }
+                            state.release = Some(ReleaseInfo {
+                                version: candidate.clone(),
+                                tag: remote.tag_name.clone(),
+                                body: remote.body.clone().unwrap_or_default(),
+                            });
+                            (host.emit)(Event::Release(state.release.clone().map(Box::new)));
                             let name = format!("periph-in-one-{candidate}-windows-x64-ota.zip");
                             let asset =
                                 remote
@@ -330,6 +426,7 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                             let id = nonce()?;
                             let directory = storage::transaction_path(&root, &id)?;
                             fs::create_dir(&directory).map_err(|_| "更新目录不可写".to_string())?;
+                            storage::write(&directory.join("owner.json"), &super::APP_ID)?;
                             let archive = directory.join(&name);
                             let mut file = fs::OpenOptions::new()
                                 .write(true)
@@ -352,6 +449,7 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                             {
                                 return Err("更新下载不完整".to_string().into());
                             }
+                            let mut quarantine = false;
                             let verified = (|| -> Result<Transaction, String> {
                                 let manifest = package::stage(
                                     &archive,
@@ -359,8 +457,13 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                     &keys,
                                     floor,
                                     schema,
-                                )?;
+                                )
+                                .map_err(|error| {
+                                    quarantine = matches!(error, package::StageError::Untrusted(_));
+                                    error.to_string()
+                                })?;
                                 if manifest.version != candidate {
+                                    quarantine = true;
                                     return Err("更新版本与发布不符".into());
                                 }
                                 (host.probe)(
@@ -378,18 +481,28 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                     manifest,
                                     phase: Phase::Verified,
                                     old_sha256: None,
+                                    old_payload: Vec::new(),
                                     config_sha256: None,
                                     token: nonce()?,
                                 })
                             })();
                             match verified {
                                 Ok(transaction) => {
+                                    state.recovery_backup = state
+                                        .transaction
+                                        .as_ref()
+                                        .filter(|t| {
+                                            matches!(t.phase, Phase::Committed | Phase::RolledBack)
+                                        })
+                                        .map(|t| t.id.clone());
                                     state.highest_accepted = Some(candidate);
                                     state.transaction = Some(transaction);
                                 }
                                 Err(error) => {
-                                    if !stop.load(Ordering::Acquire) {
+                                    if quarantine && !stop.load(Ordering::Acquire) {
                                         state.rejected.push(candidate);
+                                        state.release = None;
+                                        (host.emit)(Event::Release(None));
                                         storage::write(&storage::state_path(&root), &state)?;
                                     }
                                     return Err(error.into());
@@ -397,6 +510,7 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                             }
                             Ok(())
                         })();
+                        let preparation_failed = prepare && result.is_err();
                         let (message, server) = match result {
                             Ok(()) => {
                                 state.failures = 0;
@@ -419,6 +533,16 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                 (error.message, error.retry)
                             }
                         };
+                        state.retry_after =
+                            server.map_or(0, |delay| now().saturating_add(delay.as_secs()));
+                        super::transaction::diagnostic(
+                            &root,
+                            if state.failures == 0 {
+                                "check-ok"
+                            } else {
+                                "check-failed"
+                            },
+                        );
                         state.next_check = now().saturating_add(
                             scheduler::delay(
                                 state.failures,
@@ -428,8 +552,12 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                             .as_secs(),
                         );
                         if let Err(error) = storage::write(&storage::state_path(&root), &state) {
+                            state = storage::read(&storage::state_path(&root)).unwrap_or_default();
                             status(host, &preferences, &state, error, false);
                         } else {
+                            if preparation_failed {
+                                (host.emit)(Event::PreparationFailed(message.clone()));
+                            }
                             status(host, &preferences, &state, message, false);
                         }
                     }
@@ -437,7 +565,12 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
             }
         })
         .map_err(|_| "无法启动更新服务")?;
-    Ok(Controller { sender, cancelled })
+    Ok(Controller {
+        sender,
+        cancelled,
+        preferences: Some(preferences),
+        preference_writer: Some(preference_writer),
+    })
 }
 
 pub fn validate_cached(
@@ -447,6 +580,7 @@ pub fn validate_cached(
     host: Host,
 ) -> Result<(), String> {
     let directory = storage::transaction_path(root, &transaction.id)?;
+    super::transaction::plain(root, &directory)?;
     let expected_name = format!(
         "periph-in-one-{}-windows-x64-ota.zip",
         transaction.manifest.version
@@ -456,7 +590,8 @@ pub fn validate_cached(
     {
         return Err("缓存的更新包校验失败".into());
     }
-    let check = directory.join(nonce()?);
+    let check_directory = tempfile::tempdir_in(&directory).map_err(|_| "更新目录不可写")?;
+    let check = check_directory.path().join("verified");
     let manifest = package::stage(
         &directory.join(expected_name),
         &check,
@@ -464,8 +599,12 @@ pub fn validate_cached(
         &Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?,
         schema,
     )?;
+    if manifest != transaction.manifest {
+        return Err("缓存的更新清单不一致".into());
+    }
     for payload in &manifest.payload {
         let path = directory.join("staged").join(&payload.path);
+        super::transaction::plain(root, &path)?;
         if fs::symlink_metadata(&path)
             .map_err(|e| e.to_string())?
             .file_type()
@@ -476,4 +615,68 @@ pub fn validate_cached(
         }
     }
     (host.probe)(&directory.join("staged/periph-in-one.exe"), &manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn changelog_and_tag_are_read_from_the_same_public_release_response() {
+        let bytes = br###"{"id":1,"tag_name":"v0.23.0","body":"## Fixes\n- Battery","draft":false,"prerelease":false,"assets":[]}"###;
+        let release = decode_release(bytes).unwrap();
+        assert_eq!(release.tag_name, "v0.23.0");
+        assert_eq!(release.body.as_deref(), Some("## Fixes\n- Battery"));
+        for flags in [(true, false), (false, true)] {
+            let json = format!(
+                r#"{{"id":1,"tag_name":"v0.23.0","body":null,"draft":{},"prerelease":{},"assets":[]}}"#,
+                flags.0, flags.1
+            );
+            assert!(decode_release(json.as_bytes()).is_err());
+        }
+    }
+    #[test]
+    fn disabling_updates_is_durable_even_when_the_network_worker_stops_first() {
+        let root = tempfile::tempdir().unwrap();
+        storage::write(
+            &storage::preferences_path(root.path()),
+            &Preferences { automatic: true },
+        )
+        .unwrap();
+        let controller = start(
+            root.path().to_owned(),
+            2,
+            Host {
+                probe: |_, _| Ok(()),
+                available_space: |_| Ok(u64::MAX),
+                emit: |_| {},
+            },
+        )
+        .unwrap();
+        controller.send(Command::Automatic(false));
+        drop(controller);
+        assert!(
+            !storage::read::<Preferences>(&storage::preferences_path(root.path()))
+                .unwrap()
+                .automatic
+        );
+    }
+    #[test]
+    fn cancellation_aborts_copy_without_interrupted_write_retry_loop() {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let cancelled = AtomicBool::new(true);
+            let result = io::copy(
+                &mut io::Cursor::new(b"payload"),
+                &mut Sink {
+                    output: Vec::new(),
+                    cancelled: &cancelled,
+                },
+            );
+            sender.send(result.unwrap_err().kind()).unwrap();
+        });
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            io::ErrorKind::ConnectionAborted
+        );
+    }
 }

@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .renderer_name("software".into())
         .select()?;
     let ui = AppWindow::new()?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let rows: Vec<_> = [
         (
             "办公鼠标",
@@ -79,6 +80,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_editing_hardware_id("VID: 0x373B · PID: 0x1216".into());
     ui.set_editing_alias("办公鼠标".into());
     ui.set_editing_has_name(true);
+    ui.set_update_available(true);
+    ui.set_update_version("0.23.0".into());
+    ui.set_update_ready(true);
+    ui.set_update_status("更新已就绪".into());
+    ui.set_update_notes(ModelRc::new(VecModel::from(vec![
+        ChangelogRow {
+            text: "更新说明 · 布局示例".into(),
+            heading: true,
+            code: false,
+        },
+        ChangelogRow {
+            text: "• 更新窗口使用对应 Release tag 的说明。".into(),
+            heading: false,
+            code: false,
+        },
+        ChangelogRow {
+            text: "• 就绪后可重启并更新。".into(),
+            heading: false,
+            code: false,
+        },
+    ])));
     ui.window().set_size(slint::LogicalSize::new(740.0, 620.0));
     ui.show()?;
     let timer = slint::Timer::default();
@@ -90,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(600),
         move || {
             let ui = weak.unwrap();
-            let names = ["overview", "remark", "settings", "mini"];
+            let names = ["overview", "remark", "settings", "update", "mini"];
             if step < names.len() {
                 let result = (|| -> Result<(), Box<dyn std::error::Error>> {
                     let pixels = ui.window().take_snapshot()?;
@@ -112,11 +134,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step += 1;
             ui.set_editing(step == 1);
             ui.set_settings_open(step == 2);
-            if step == 3 {
+            ui.set_updates_open(step == 3);
+            if step == 4 {
                 ui.set_mini_mode(true);
                 ui.window().set_size(slint::LogicalSize::new(280.0, 224.0));
             }
-            if step == 4 {
+            if step == 5 {
                 slint::quit_event_loop().unwrap();
             }
         },

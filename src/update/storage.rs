@@ -34,6 +34,8 @@ pub struct Transaction {
     pub manifest: Manifest,
     pub phase: Phase,
     pub old_sha256: Option<String>,
+    #[serde(default)]
+    pub old_payload: Vec<super::package::Payload>,
     pub config_sha256: Option<String>,
     pub token: String,
 }
@@ -41,16 +43,27 @@ pub struct Transaction {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct State {
+    pub release: Option<ReleaseInfo>,
     pub highest_accepted: Option<Version>,
     pub rejected: Vec<Version>,
     pub transaction: Option<Transaction>,
     pub next_check: u64,
     pub failures: u32,
+    pub retry_after: u64,
+    pub recovery_backup: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseInfo {
+    pub version: Version,
+    pub tag: String,
+    pub body: String,
 }
 
 pub fn read<T: DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
     match fs::read(path) {
-        Ok(bytes) if bytes.len() <= 2 * 1024 * 1024 => {
+        Ok(bytes) if bytes.len() <= 8 * 1024 * 1024 => {
             serde_json::from_slice(&bytes).map_err(|_| "更新状态损坏，请保留原文件".into())
         }
         Ok(_) => Err("更新状态文件过大".into()),
@@ -87,6 +100,7 @@ pub fn transaction_path(root: &Path, id: &str) -> Result<PathBuf, String> {
 }
 
 pub fn lock(root: &Path) -> Result<fs::File, String> {
+    super::transaction::plain(root, &root.join(".ota/task.lock"))?;
     fs::create_dir_all(root.join(".ota")).map_err(|_| "更新目录不可写")?;
     let file = fs::OpenOptions::new()
         .read(true)

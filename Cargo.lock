@@ -4121,6 +4121,7 @@ dependencies = [
  "hidapi",
  "periph-hal",
  "png",
+ "pulldown-cmark",
  "raw-window-handle",
  "self_update",
  "semver",

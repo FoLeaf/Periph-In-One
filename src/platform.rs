@@ -276,10 +276,10 @@ fn panel_hit_test(x: i32, y: i32, width: i32, height: i32, dpi: u32, mini: bool)
             return hit;
         }
     }
-    let (header, button_y, button_right_offsets) = if mini {
-        (42.0, 5.0, [78.0, 42.0])
+    let (header, button_y, button_right_offsets): (_, _, &[f32]) = if mini {
+        (42.0, 5.0, &[78.0, 42.0])
     } else {
-        (84.0, 28.0, [92.0, 52.0])
+        (84.0, 28.0, &[132.0, 92.0, 52.0])
     };
     let over_button = y >= button_y
         && y < button_y + 32.0
@@ -646,7 +646,7 @@ mod tests {
                 for (x, y) in [(40, 40), (150, 32), (width / 2, 72), (width - 20, 76)] {
                     assert_eq!(hit(x, y, width, 640, false), HTCAPTION);
                 }
-                for x in [width - 76, width - 36] {
+                for x in [width - 116, width - 76, width - 36] {
                     assert_eq!(hit(x, 44, width, 640, false), HTCLIENT);
                 }
                 assert_eq!(hit(100, 120, width, 640, false), HTCLIENT);

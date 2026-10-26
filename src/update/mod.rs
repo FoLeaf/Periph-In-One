@@ -1,7 +1,9 @@
 //! Application update policy and verified packages; HAL has no update dependencies.
+pub mod notes;
 pub mod package;
 pub mod scheduler;
 pub mod storage;
+pub mod transaction;
 #[cfg(windows)]
 pub mod worker;
 
@@ -9,6 +11,21 @@ pub const APP_ID: &str = "io.github.FoLeaf.PeriphInOne";
 pub const TARGET: &str = "x86_64-pc-windows-msvc";
 pub const PROTOCOL: u32 = 1;
 pub const UPDATER_VERSION: u32 = 1;
+pub const BUILD_TARGET: &str = if cfg!(all(
+    target_os = "windows",
+    target_arch = "x86_64",
+    target_env = "msvc"
+)) {
+    TARGET
+} else if cfg!(all(
+    target_os = "windows",
+    target_arch = "x86_64",
+    target_env = "gnu"
+)) {
+    "x86_64-pc-windows-gnu"
+} else {
+    "unsupported"
+};
 pub const MAX_PACKAGE: u64 = 64 * 1024 * 1024;
 pub const MAX_EXPANDED: u64 = 192 * 1024 * 1024;
 

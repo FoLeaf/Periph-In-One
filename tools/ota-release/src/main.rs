@@ -160,6 +160,7 @@ fn prepare(exe: &Path, output: &Path, version: &str) -> Result<(), String> {
     }
     copy_tree(Path::new("assets/readme"), &root.join("assets/readme"))?;
     copy_tree(Path::new("licenses"), &root.join("licenses"))?;
+    fs::copy("LICENSE", root.join("licenses/Periph-In-One-LICENSE")).map_err(|e| e.to_string())?;
     let metadata = std::process::Command::new("cargo")
         .args([
             "metadata",

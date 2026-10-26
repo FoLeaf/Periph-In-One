@@ -63,19 +63,39 @@ fn rejects_replay_prerelease_wrong_platform_schema_and_windows_path_aliases() {
     assert!(m.validate(&floor, 2).is_err());
 }
 
-fn archive(path: &Path, extra: &str) -> [u8; 32] {
+fn archive(path: &Path, extra: Option<&str>) -> [u8; 32] {
     let mut unsigned = tempfile::tempfile().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut manifest = manifest();
+    for (index, byte) in [1u8, 2].iter().enumerate() {
+        let file = directory.path().join(index.to_string());
+        fs::write(&file, [*byte]).unwrap();
+        manifest.payload[index].sha256 = package::hash_file(&file).unwrap();
+    }
     {
         let mut zip = zip::ZipWriter::new(&mut unsigned);
         for (name, bytes) in [
-            ("ota.json", serde_json::to_vec(&manifest()).unwrap()),
+            ("ota.json", serde_json::to_vec(&manifest).unwrap()),
             ("periph-in-one.exe", vec![1]),
             ("licenses/LICENSE", vec![2]),
-            (extra, vec![3]),
         ] {
             zip.start_file(name, zip::write::SimpleFileOptions::default())
                 .unwrap();
             zip.write_all(&bytes).unwrap();
+        }
+        if let Some(extra) = extra {
+            if extra == "__symlink" {
+                zip.add_symlink(
+                    "licenses/link",
+                    "../../outside",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            } else {
+                zip.start_file(extra, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(&[3]).unwrap();
+            }
         }
         zip.finish().unwrap();
     }
@@ -103,11 +123,59 @@ fn archive(path: &Path, extra: &str) -> [u8; 32] {
 fn rejects_empty_trust_store_and_signed_path_traversal_before_creating_staging() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("candidate.zip");
-    let public = archive(&path, "../escaped");
+    let public = archive(&path, Some("../escaped"));
     let stage = dir.path().join("staged");
     let floor = "0.22.0".parse().unwrap();
     assert!(package::stage(&path, &stage, &[], &floor, 2).is_err());
     assert!(package::stage(&path, &stage, &[public], &floor, 2).is_err());
     assert!(!stage.exists());
     assert!(!dir.path().join("escaped").exists());
+}
+
+#[test]
+fn valid_signature_and_payload_hashes_stage_exactly_the_whitelisted_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("candidate.zip");
+    let public = archive(&path, None);
+    let staging = dir.path().join("staged");
+    let manifest =
+        package::stage(&path, &staging, &[public], &"0.22.0".parse().unwrap(), 2).unwrap();
+    assert_eq!(manifest.version.to_string(), "0.23.0");
+    assert_eq!(fs::read(staging.join("periph-in-one.exe")).unwrap(), [1]);
+    assert_eq!(fs::read(staging.join("licenses/LICENSE")).unwrap(), [2]);
+    assert!(!staging.join("ota.json").exists());
+}
+
+#[test]
+fn signed_symlinks_case_aliases_and_expansion_limits_are_rejected() {
+    let floor = "0.22.0".parse().unwrap();
+    for extra in ["__symlink", "licenses/license"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.zip");
+        let public = archive(&path, Some(extra));
+        let staging = dir.path().join("staged");
+        assert!(matches!(
+            package::stage(&path, &staging, &[public], &floor, 2),
+            Err(package::StageError::Untrusted(_))
+        ));
+        assert!(!staging.exists());
+    }
+    let mut manifest = manifest();
+    manifest.payload[0].size = update::MAX_EXPANDED + 1;
+    assert!(manifest.validate(&floor, 2).is_err());
+    manifest.payload[0].size = u64::MAX;
+    assert!(manifest.validate(&floor, 2).is_err());
+}
+
+#[test]
+fn temporary_disk_failures_are_distinct_from_untrusted_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("candidate.zip");
+    let public = archive(&path, None);
+    let staging = dir.path().join("staged");
+    fs::write(&staging, b"occupied").unwrap();
+    assert!(matches!(
+        package::stage(&path, &staging, &[public], &"0.22.0".parse().unwrap(), 2),
+        Err(package::StageError::Unavailable(_))
+    ));
 }

@@ -1,8 +1,4 @@
 fn main() {
-    println!(
-        "cargo:rustc-env=PERIPH_BUILD_TARGET={}",
-        std::env::var("TARGET").unwrap()
-    );
     println!("cargo:rerun-if-changed=ui/app.slint");
     // README screenshots do not affect the embedded application resources.
     for entry in std::fs::read_dir("assets").expect("assets directory is missing") {

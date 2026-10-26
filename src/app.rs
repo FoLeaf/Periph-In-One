@@ -1,4 +1,4 @@
-use crate::{AppWindow, DeviceRow, platform};
+use crate::{AppWindow, ChangelogRow, DeviceRow, platform};
 use chrono::{DateTime, Local};
 use periph_in_one::{
     battery::Batteries,
@@ -18,7 +18,7 @@ use std::{
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tray_icon::{
     Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -46,7 +46,11 @@ pub enum Action {
     Autostart(bool),
     Update(UpdateEvent),
     AutomaticUpdate(bool),
-    CheckUpdate,
+    DownloadUpdate,
+    ReleasePage,
+    InstallUpdate,
+    UpdateTick,
+    Handoff(Result<Box<platform::update::Ready>, String>),
     Quit,
 }
 
@@ -87,6 +91,17 @@ struct App {
     rebind_ids: Vec<String>,
     presenter: platform::Presenter,
     updater: Option<updater::Controller>,
+    saved_revision: u64,
+    save_failed: bool,
+    hidden_since: Instant,
+    update_preparing: bool,
+    update_requested: bool,
+    update_deadline: Instant,
+    update_cancel: std::sync::Arc<AtomicBool>,
+    health: Option<platform::update::Health>,
+    deferred_save: bool,
+    update_retry_at: Instant,
+    update_preferences_loaded: bool,
 }
 
 fn now() -> u64 {
@@ -146,6 +161,14 @@ impl App {
     }
 
     fn persist(&mut self, success: &str) -> bool {
+        if self.health.is_some() {
+            self.deferred_save = true;
+            if !success.is_empty() {
+                self.save_notice = success.into();
+                self.notice("正在保存…");
+            }
+            return true;
+        }
         if self.config_error.is_some() {
             self.notice("无法保存修改，请检查 config/settings.json 后重启");
             return false;
@@ -168,6 +191,102 @@ impl App {
             return false;
         }
         true
+    }
+
+    fn start_updater(&mut self) {
+        let result = platform::update::root().and_then(|root| {
+            updater::start(
+                root,
+                2,
+                updater::Host {
+                    probe: platform::update::probe,
+                    available_space: platform::update::available_space,
+                    emit: |event| post(Action::Update(event)),
+                },
+            )
+        });
+        match result {
+            Ok(controller) => self.updater = Some(controller),
+            Err(error) => self.ui.set_update_status(error.into()),
+        }
+    }
+
+    fn defer_update(&mut self) {
+        self.update_cancel.store(true, Ordering::Release);
+        if self.update_preparing {
+            self.update_preparing = false;
+            self.update_requested = false;
+            self.cancel.store(false, Ordering::Release);
+            self.ui.set_update_working(false);
+            self.ui.set_update_status("更新已延后".into());
+            self.update_retry_at = Instant::now() + Duration::from_secs(15 * 60);
+        }
+    }
+
+    fn prepare_update(&mut self, manual: bool) {
+        if self.update_preparing
+            || self.health.is_some()
+            || !self.ui.get_update_ready()
+            || self.ui.get_update_working()
+            || self.config_error.is_some()
+            || self.ui.get_editing()
+            || (!manual && Instant::now() < self.update_retry_at)
+        {
+            return;
+        }
+        if manual {
+            self.save_size();
+            self.ui.set_settings_open(false);
+            self.ui.set_updates_open(false);
+            let _ = self.presenter.hide(&self.ui);
+        }
+        self.update_preparing = true;
+        self.update_requested = false;
+        self.update_cancel = std::sync::Arc::new(AtomicBool::new(false));
+        self.update_deadline = Instant::now() + Duration::from_secs(90);
+        self.cancel.store(true, Ordering::Release);
+        self.ui.set_update_working(true);
+        self.ui.set_update_status("正在准备重启…".into());
+    }
+
+    fn update_tick(&mut self) {
+        if let Some(health) = &mut self.health {
+            if health.tick().is_ok_and(|committed| committed) {
+                self.health = None;
+                if self.deferred_save {
+                    self.deferred_save = false;
+                    self.persist("");
+                }
+                self.start_updater();
+            }
+            return;
+        }
+        if self.update_preparing {
+            if self.ui.window().is_visible()
+                || Instant::now() >= self.update_deadline
+                || self.save_failed
+            {
+                self.defer_update();
+                return;
+            }
+            if !self.busy && self.saved_revision == self.save_revision && !self.update_requested {
+                self.update_requested = true;
+                if let Some(updater) = &self.updater {
+                    updater.send(UpdateCommand::Prepare);
+                }
+            }
+        } else if self.ui.get_automatic_update()
+            && periph_in_one::update::scheduler::idle(
+                self.hidden_since.elapsed().as_secs(),
+                self.ui.window().is_visible(),
+                self.ui.get_editing(),
+                self.ui.get_settings_open(),
+                self.busy,
+                !self.save_failed && self.saved_revision == self.save_revision,
+            )
+        {
+            self.prepare_update(false);
+        }
     }
 
     fn save_size(&mut self) {
@@ -283,6 +402,7 @@ impl App {
     fn handle(&mut self, action: Action) {
         match action {
             Action::InitialShow => {
+                self.defer_update();
                 if let Err(error) = self.presenter.show(
                     &self.ui,
                     slint::LogicalSize::new(self.config.width, self.config.height),
@@ -293,6 +413,9 @@ impl App {
                 }
             }
             Action::Refresh => {
+                if self.update_preparing {
+                    return;
+                }
                 if !self.busy {
                     self.busy = true;
                     self.ui.set_busy(true);
@@ -340,9 +463,11 @@ impl App {
                 self.update();
             }
             Action::Show => {
+                self.defer_update();
                 self.save_size();
                 self.ui.set_mini_mode(true);
                 self.ui.set_settings_open(false);
+                self.ui.set_updates_open(false);
                 self.ui.set_editing(false);
                 self.ui.set_deleting(false);
                 let size = slint::LogicalSize::new(280.0, self.ui.get_mini_height());
@@ -354,6 +479,7 @@ impl App {
                 }
             }
             Action::Expand => {
+                self.defer_update();
                 let anchor = platform::window_rect(self.ui.window());
                 self.ui.set_mini_mode(false);
                 self.ui.set_autostart(platform::autostart_enabled());
@@ -368,9 +494,11 @@ impl App {
             Action::Hide => {
                 self.save_size();
                 self.ui.set_settings_open(false);
+                self.ui.set_updates_open(false);
                 self.ui.set_editing(false);
                 self.ui.set_deleting(false);
                 let _ = self.presenter.hide(&self.ui);
+                self.hidden_since = Instant::now();
             }
             Action::SaveSize => self.save_size(),
             Action::Edit(id) => {
@@ -496,17 +624,22 @@ impl App {
                 }
             }
             Action::Saved(revision, result) => {
+                if result.is_ok() {
+                    self.saved_revision = self.saved_revision.max(revision);
+                }
                 // Older completions must not clear a newer error or confirm a
                 // modification that has not reached disk yet.
                 if revision == self.save_revision {
                     match result {
                         Ok(()) => {
+                            self.save_failed = false;
                             if !self.save_notice.is_empty() {
                                 let message = std::mem::take(&mut self.save_notice);
                                 self.notice(message);
                             }
                         }
                         Err(error) => {
+                            self.save_failed = true;
                             self.save_notice.clear();
                             self.notice(error);
                         }
@@ -531,24 +664,120 @@ impl App {
                     automatic,
                     ready,
                 } => {
-                    self.ui.set_update_status(message.into());
-                    self.ui.set_update_working(working);
-                    self.ui.set_automatic_update(automatic);
+                    if !self.update_preparing {
+                        self.ui.set_update_status(message.into());
+                    }
+                    self.ui.set_update_working(working || self.update_preparing);
+                    if !self.update_preferences_loaded {
+                        self.ui.set_automatic_update(automatic);
+                        self.update_preferences_loaded = true;
+                    }
                     self.ui.set_update_ready(ready);
                 }
-                UpdateEvent::Prepared(_) => {}
+                UpdateEvent::Prepared(transaction) => {
+                    if self.update_preparing && !self.update_cancel.load(Ordering::Acquire) {
+                        let cancelled = self.update_cancel.clone();
+                        if thread::Builder::new()
+                            .name("ota-handoff".into())
+                            .spawn(move || {
+                                post(Action::Handoff(
+                                    platform::update::handoff(&transaction, &cancelled)
+                                        .map(Box::new),
+                                ));
+                            })
+                            .is_err()
+                        {
+                            self.defer_update();
+                            self.ui
+                                .set_update_status("无法启动更新任务，请稍后重试".into());
+                        }
+                    }
+                }
+                UpdateEvent::PreparationFailed(error) => {
+                    self.defer_update();
+                    self.ui.set_update_status(error.into());
+                }
+                UpdateEvent::Preference { automatic, error } => {
+                    self.update_preferences_loaded = true;
+                    self.ui.set_automatic_update(automatic);
+                    if let Some(error) = error {
+                        self.ui.set_update_status(error.into());
+                    }
+                }
+                UpdateEvent::Release(release) => {
+                    self.ui.set_update_available(release.is_some());
+                    if let Some(release) = release {
+                        self.ui
+                            .set_update_version(release.version.to_string().into());
+                        self.ui.set_update_notes(ModelRc::new(VecModel::from(
+                            periph_in_one::update::notes::blocks(&release.body)
+                                .into_iter()
+                                .map(|block| ChangelogRow {
+                                    text: block.text.into(),
+                                    heading: block.style
+                                        == periph_in_one::update::notes::Style::Heading,
+                                    code: block.style == periph_in_one::update::notes::Style::Code,
+                                })
+                                .collect::<Vec<_>>(),
+                        )));
+                    } else {
+                        self.ui.set_updates_open(false);
+                    }
+                }
             },
             Action::AutomaticUpdate(enabled) => {
+                self.update_preferences_loaded = true;
+                if !enabled {
+                    self.defer_update();
+                }
                 if let Some(updater) = &self.updater {
                     updater.send(UpdateCommand::Automatic(enabled));
                 }
             }
-            Action::CheckUpdate => {
+            Action::DownloadUpdate => {
                 if let Some(updater) = &self.updater {
                     updater.send(UpdateCommand::Check);
                 }
             }
+            Action::ReleasePage => {
+                if let Err(error) = platform::update::open_release(&self.ui.get_update_version()) {
+                    self.ui.set_update_status(error.into());
+                }
+            }
+            Action::InstallUpdate => self.prepare_update(true),
+            Action::UpdateTick => self.update_tick(),
+            Action::Handoff(result) => match result {
+                Ok(ready)
+                    if self.update_preparing
+                        && !self.update_cancel.load(Ordering::Acquire)
+                        && !self.ui.window().is_visible()
+                        && !self.busy
+                        && !self.save_failed
+                        && self.saved_revision == self.save_revision =>
+                {
+                    match ready.release() {
+                        Ok(()) => {
+                            self.updater.take();
+                            let _ = self.worker.send(WorkerCommand::Stop);
+                            let _ = slint::quit_event_loop();
+                        }
+                        Err(error) => {
+                            self.defer_update();
+                            self.ui.set_update_status(error.into());
+                        }
+                    }
+                }
+                Ok(_) => self.defer_update(),
+                Err(error) => {
+                    self.defer_update();
+                    self.ui.set_update_status(error.into());
+                }
+            },
             Action::Quit => {
+                self.update_cancel.store(true, Ordering::Release);
+                if let Some(health) = &self.health {
+                    health.user_exit();
+                }
                 self.save_size();
                 self.cancel.store(true, Ordering::Release);
                 let _ = self.worker.send(WorkerCommand::Stop);
@@ -634,7 +863,9 @@ pub fn run() -> Result<(), String> {
         }
         return Ok(());
     }
-    let autostart = arguments.iter().any(|a| a == "--autostart");
+    let autostart = arguments
+        .iter()
+        .any(|a| matches!(a.as_str(), "--autostart" | "--ota-resume"));
     platform::initialize_taskbar()?;
     let Some(_instance) = platform::single_instance(autostart)? else {
         return Ok(());
@@ -657,6 +888,10 @@ pub fn run() -> Result<(), String> {
         Ok(c) => (c, None),
         Err(e) => (Config::default(), Some(e.to_string())),
     };
+    let health = platform::update::Health::begin()?;
+    if health.is_some() && config_error.is_some() {
+        return Err("新版本无法读取配置".into());
+    }
     ui.window()
         .set_size(slint::LogicalSize::new(config.width, config.height));
     let initial = model::restore(&config.devices);
@@ -695,26 +930,27 @@ pub fn run() -> Result<(), String> {
         rebind_ids: vec![],
         presenter: platform::Presenter::default(),
         updater: None,
+        saved_revision: 0,
+        save_failed: false,
+        hidden_since: Instant::now(),
+        update_preparing: false,
+        update_requested: false,
+        update_deadline: Instant::now(),
+        update_cancel: std::sync::Arc::new(AtomicBool::new(false)),
+        health,
+        deferred_save: false,
+        update_retry_at: Instant::now(),
+        update_preferences_loaded: false,
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-    let root = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("无法确定程序目录")?
-        .to_path_buf();
-    match updater::start(
-        root,
-        2,
-        updater::Host {
-            probe: platform::update::probe,
-            available_space: platform::update::available_space,
-            emit: |event| post(Action::Update(event)),
-        },
-    ) {
-        Ok(controller) => app.borrow_mut().updater = Some(controller),
-        Err(error) => ui.set_update_status(error.into()),
+    if app.borrow().health.is_none() {
+        app.borrow_mut().start_updater();
     }
+    let update_timer = slint::Timer::default();
+    update_timer.start(slint::TimerMode::Repeated, Duration::from_secs(1), || {
+        post(Action::UpdateTick)
+    });
     ui.on_refresh(|| post(Action::Refresh));
     ui.on_hide_window(|| post(Action::Hide));
     ui.on_expand(|| post(Action::Expand));
@@ -731,7 +967,9 @@ pub fn run() -> Result<(), String> {
     ui.on_delete_device(|id| post(Action::Delete(id.into())));
     ui.on_toggle_autostart(|enabled| post(Action::Autostart(enabled)));
     ui.on_toggle_update(|enabled| post(Action::AutomaticUpdate(enabled)));
-    ui.on_check_update(|| post(Action::CheckUpdate));
+    ui.on_download_update(|| post(Action::DownloadUpdate));
+    ui.on_restart_update(|| post(Action::InstallUpdate));
+    ui.on_open_release(|| post(Action::ReleasePage));
     ui.window().on_close_requested(|| {
         post(Action::Hide);
         slint::CloseRequestResponse::KeepWindowShown

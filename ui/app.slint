@@ -1,5 +1,7 @@
 import { ScrollView, LineEdit, Button, CheckBox, ComboBox } from "std-widgets.slint";
 
+export struct ChangelogRow { text: string, heading: bool, code: bool }
+
 export struct DeviceRow {
     id: string,
     title: string,
@@ -167,6 +169,10 @@ export component AppWindow inherits Window {
     in property <bool> update-working;
     in property <bool> update-ready;
     in property <string> update-status;
+    in property <bool> update-available;
+    in property <string> update-version;
+    in property <[ChangelogRow]> update-notes;
+    in-out property <bool> updates-open;
     in-out property <bool> editing;
     in-out property <bool> deleting;
     in-out property <string> deleting-id;
@@ -193,7 +199,9 @@ export component AppWindow inherits Window {
     callback delete-device(string);
     callback toggle-autostart(bool);
     callback toggle-update(bool);
-    callback check-update();
+    callback download-update();
+    callback restart-update();
+    callback open-release();
 
     if root.mini-mode: MiniPanel {
         width: 100%;
@@ -212,9 +220,10 @@ export component AppWindow inherits Window {
         height: 100%;
         Rectangle { border-width: 1px; border-color: #d5d5dc; border-radius: 16px; background: transparent; }
         Image { x: 22px; y: 25px; width: 38px; height: 38px; source: @image-url("../assets/brand.svg"); }
-        Text { x: 72px; y: 21px; width: parent.width - 174px; height: 31px; text: "Periph In One"; font-size: 20px; font-weight: 700; color: #18181b; }
+        Text { x: 72px; y: 21px; width: parent.width - (root.update-available ? 214px : 174px); height: 31px; text: "Periph In One"; font-size: 20px; font-weight: 700; color: #18181b; overflow: elide; }
         Text { x: 73px; y: 54px; width: parent.width - 96px; height: 18px; text: root.summary; font-size: 11px; color: #7b7b84; overflow: elide; }
         IconButton { x: parent.width - 92px; y: 28px; icon: @image-url("../assets/settings.svg"); label: "设置"; clicked => { root.settings-open = !root.settings-open; } }
+        if root.update-available: IconButton { x: parent.width - 132px; y: 28px; icon: @image-url("../assets/up.svg"); label: "查看新版本"; clicked => { root.settings-open = false; root.updates-open = true; } }
         IconButton { x: parent.width - 52px; y: 28px; icon: @image-url("../assets/close.svg"); label: "隐藏到托盘"; clicked => { root.hide-window(); } }
 
         ScrollView {
@@ -248,14 +257,14 @@ export component AppWindow inherits Window {
         if root.notice != "": Text { x: 24px; y: parent.height - 25px; width: parent.width - 48px; height: 18px; text: root.notice; font-size: 10px; color: #bb6425; overflow: elide; }
         IconButton { x: parent.width - 54px; y: parent.height - 54px; icon: @image-url("../assets/refresh.svg"); label: "立即刷新"; clicked => { if !root.busy { root.refresh(); } } }
 
-        if root.settings-open || root.editing || root.deleting: Rectangle {
+        if root.settings-open || root.editing || root.deleting || root.updates-open: Rectangle {
             background: #10101455;
-            TouchArea { clicked => { root.settings-open = false; root.editing = false; root.deleting = false; } }
+            TouchArea { clicked => { root.settings-open = false; root.editing = false; root.deleting = false; root.updates-open = false; } }
         }
 
         if root.settings-open: Rectangle {
             x: max(16px, (parent.width - 360px) / 2); y: max(24px, (parent.height - self.height) / 2);
-            width: min(parent.width - 32px, 360px); height: min(parent.height - 48px, 270px);
+            width: min(parent.width - 32px, 360px); height: min(parent.height - 48px, root.update-status != "" && !root.update-available ? 245px : 210px);
             border-radius: 16px; background: #ffffff;
             TouchArea { clicked => {} }
             ScrollView {
@@ -265,12 +274,43 @@ export component AppWindow inherits Window {
                 HorizontalLayout { Text { text: "设置"; font-size: 20px; font-weight: 600; color: #18181b; } IconButton { icon: @image-url("../assets/close.svg"); label: "关闭设置"; clicked => { root.settings-open = false; } } }
                 CheckBox { text: "开机启动"; checked <=> root.autostart; toggled => { root.toggle-autostart(self.checked); } }
                 CheckBox { text: "自动更新"; checked <=> root.automatic-update; toggled => { root.toggle-update(self.checked); } }
+                Text { text: "版本 " + root.app-version; color: #64646e; font-size: 12px; }
+                if root.update-status != "" && !root.update-available: Text { text: root.update-status; color: #64646e; font-size: 12px; wrap: word-wrap; }
+            }
+            }
+        }
+
+        if root.updates-open: Rectangle {
+            x: max(16px, (parent.width - 480px) / 2); y: max(24px, (parent.height - self.height) / 2);
+            width: min(parent.width - 32px, 480px); height: min(parent.height - 48px, 480px);
+            border-radius: 16px; background: #ffffff;
+            TouchArea { clicked => {} }
+            VerticalLayout {
+                padding: 22px; spacing: 16px;
                 HorizontalLayout {
-                    Text { text: "版本 " + root.app-version; color: #64646e; vertical-alignment: center; }
-                    Button { text: "检查更新"; enabled: !root.update-working; clicked => { root.check-update(); } }
+                    min-height: 32px; max-height: 32px;
+                    Text { text: "新版本 " + root.update-version; font-size: 18px; font-weight: 600; color: #18181b; overflow: elide; }
+                    IconButton { icon: @image-url("../assets/close.svg"); label: "关闭更新窗口"; clicked => { root.updates-open = false; } }
+                }
+                ScrollView {
+                    viewport-width: self.visible-width;
+                    VerticalLayout {
+                        spacing: 10px; alignment: start;
+                        for note in root.update-notes: Text {
+                            text: note.text; wrap: word-wrap; color: #303035;
+                            font-size: note.heading ? 16px : 12px; font-weight: note.heading ? 600 : 400;
+                            font-family: note.code ? "Consolas" : "Microsoft YaHei UI";
+                        }
+                        if root.update-notes.length == 0: Text { text: "该版本暂无更新说明"; color: #797982; font-size: 12px; }
+                    }
                 }
                 if root.update-status != "": Text { text: root.update-status; color: #64646e; font-size: 12px; wrap: word-wrap; }
-            }
+                HorizontalLayout {
+                    min-height: 36px; max-height: 36px; spacing: 12px;
+                    Button { text: "发布页面"; clicked => { root.open-release(); } }
+                    if root.update-ready: Button { text: "重启并更新"; enabled: !root.update-working; clicked => { root.restart-update(); } }
+                    if !root.update-ready && !root.update-working: Button { text: "下载更新"; clicked => { root.download-update(); } }
+                }
             }
         }
 

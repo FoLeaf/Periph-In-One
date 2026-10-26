@@ -9,7 +9,36 @@ use std::{
     path::Path,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug)]
+pub enum StageError {
+    Untrusted(String),
+    Unavailable(String),
+}
+impl From<&str> for StageError {
+    fn from(value: &str) -> Self {
+        Self::Untrusted(value.into())
+    }
+}
+impl From<String> for StageError {
+    fn from(value: String) -> Self {
+        Self::Unavailable(value)
+    }
+}
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Untrusted(message) | Self::Unavailable(message) => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for StageError {}
+impl From<StageError> for String {
+    fn from(value: StageError) -> Self {
+        value.to_string()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Payload {
     pub path: String,
@@ -17,7 +46,7 @@ pub struct Payload {
     pub sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub app_id: String,
@@ -143,7 +172,7 @@ pub fn stage(
     keys: &[[u8; 32]],
     floor: &Version,
     schema: u32,
-) -> Result<Manifest, String> {
+) -> Result<Manifest, StageError> {
     if keys.is_empty() {
         return Err("此构建尚未配置更新签名".into());
     }
@@ -151,7 +180,13 @@ pub fn stage(
     if !metadata.is_file() || metadata.len() > MAX_PACKAGE {
         return Err("更新包过大或无效".into());
     }
-    self_update::verify_signature(path, keys).map_err(|_| "更新签名验证失败".to_string())?;
+    self_update::verify_signature(path, keys).map_err(|error| {
+        if matches!(error, self_update::errors::Error::Io(_)) {
+            StageError::Unavailable("无法读取更新包，请稍后重试".into())
+        } else {
+            StageError::Untrusted("更新签名验证失败".into())
+        }
+    })?;
     let mut archive = zip::ZipArchive::new(fs::File::open(path).map_err(|e| e.to_string())?)
         .map_err(|_| "更新包损坏")?;
     if archive.len() > 4097 {
@@ -168,7 +203,9 @@ pub fn stage(
         return Err("更新清单过大".into());
     }
     let manifest: Manifest = serde_json::from_slice(&json).map_err(|_| "更新清单损坏")?;
-    manifest.validate(floor, schema)?;
+    manifest
+        .validate(floor, schema)
+        .map_err(StageError::Untrusted)?;
     let mut seen = BTreeSet::new();
     let mut total = 0u64;
     // Validate the entire archive before creating even the first output file.
@@ -205,7 +242,7 @@ pub fn stage(
     }
     // create_dir refuses existing directories and reparse points. Only freshly
     // created descendants are used; no ZIP metadata or link attributes restored.
-    fs::create_dir(destination).map_err(|_| "无法创建更新暂存目录")?;
+    fs::create_dir(destination).map_err(|_| "无法创建更新暂存目录".to_string())?;
     for payload in &manifest.payload {
         let output = destination.join(&payload.path);
         if let Some(parent) = output.parent() {
@@ -218,11 +255,11 @@ pub fn stage(
             .open(&output)
             .map_err(|e| e.to_string())?;
         let count = std::io::copy(&mut source.by_ref().take(payload.size + 1), &mut target)
-            .map_err(|_| "无法解压更新")?;
+            .map_err(|_| "无法解压更新".to_string())?;
         target
             .flush()
             .and_then(|_| target.sync_all())
-            .map_err(|_| "无法保存更新")?;
+            .map_err(|_| "无法保存更新".to_string())?;
         if count != payload.size || hash_file(&output)? != payload.sha256.to_ascii_lowercase() {
             return Err("更新文件校验失败".into());
         }
