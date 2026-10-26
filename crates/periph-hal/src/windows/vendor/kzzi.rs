@@ -77,7 +77,7 @@ fn identify(link: &KzziLink) -> Result<(String, bool), HardwareError> {
                 && let Some(psd) = protocol::kzzi_identity(&buffer[..n])
             {
                 return Ok((
-                    protocol::kzzi_model_name(&psd).unwrap_or_default().into(),
+                    protocol::compx_model_name(&psd).unwrap_or_default().into(),
                     protocol::kzzi_battery_private(&psd),
                 ));
             }

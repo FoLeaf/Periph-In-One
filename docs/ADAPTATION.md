@@ -93,6 +93,10 @@ v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与�
 
 **复查教训（表污染）**：原报告 FF05 鼠标/接收器表（122 行）混入 31 个外设 PID 与 1 个 OTA 裸 dataFilter 对象——成表脚本只排除了 monitor/tablet/handheld 三类标记。清洗改以对象自带的专属 ID 字段（monitorID / tabletID / handheldID / aiGlassesID / speakerID / webcamID / dockID / microphoneID）与 meta.deviceType 为准，而非仅 firmwareMark。这正是第 3 节档位纪律的价值：进 matcher 前逐条核对，清洗后 89 个 PID 全部有独立提取证据。
 
+**FF02 V2 接收器（PR #3，作者真机验证于 2026-10-25）**：ATK V HUB 2.3.47 设备表中带 receiver 标记的 CompX 接收器使用 `3554` + `FF02:0002`，PID 为 `F201/F503/F505/F50B/F528/F58A/F58E/F590/FB12`。F58E 的 FF04 集合拒绝写入，实际走 17 字节 output/input 报告；请求复用 `atk_ff04_request`，应答校验 report ID、命令回显、状态、有效长度和整帧和 `0x55`。作者实测 VXE R1 SE+ 1K Dongle 电量 60%、充电 0、电压 `0F51`，其余 8 个 PID 已实现未实测；未扩大到前述无接口证据的早期批次。
+
+当前驱动位于 `crates/periph-hal/src/windows/vendor/atk_v2_dongle.rs`。发现只查询在线状态（命令 3）及 RF 身份；电量（命令 4）只在显式能力读取时采样。HID 集合按 FF05 → FF02 → 其余排序。接收器报告无鼠标时使用 Disconnected / NoPairedDevice，不转换为 Unsupported；此时不把保留的旧 RF ID 当作在线外设身份。CID/MID 是型号信息，不作为本体 UID。
+
 ### 7.2 KZZI 258A 家族（Beiying OEM 双传输线）
 
 来源：KZZI RGB Keyboard 驱动 DeviceDriver.exe 静态分析（SHA-256 2a35647a…77079），复查六条载荷性结论五条 PASS、一条修正后采用。
@@ -106,6 +110,8 @@ v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与�
 **在线/未响应口径（真机）**：接收器应答 0x05 身份即视为在线。0x4A 无应答有两种含义——固件不提供电量的型号（K75 RGB key，Psd `[2,0,0,0,0,55]`，真机验证）经 `protocol::kzzi_battery_private` 标记为主应用显示已连接 · 该型号不提供电量；其余型号无应答仍按未响应处理（可能键盘关机），待真机逐一验证后再加入标记。
 
 **收录决策**：56 个 258A 型号全部是有线本体 PID，接收器形态已被 3554:FA09 适配覆盖；按第 3 节规则有线型号不进 matcher，全表进附录 A，接收器识别的最终锚点沿用 caps 事实而非 VID。
+
+**MCHOSE 公模扩展（PR #3）**：MCHOSE HUB 的 `YProduct.xml` 把 G98/X75/GX87/K99 V2/GX87 V2/KX75/X75 V2/G75 等指向 `3554:FA09` 的 0x13 协议，`Productpassword` 对应 Psd；驱动日志记录 G75 的 Psd `030000000115`。共享表现名为 `compx_model_name`，原 `kzzi_model_name` 保留兼容入口，KZZI/AULA 条目不变。G75 由 PR 作者实测电量 100%，其余新增型号已实现未实测；PSD 只决定型号，不充当设备唯一身份。
 
 ### 7.3 BIGBIG WON（Zikway FF7A 家族）
 
@@ -163,6 +169,16 @@ v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与�
 
 **写语义的 sub_id 偏移必须真机核验**：HID++ 长寄存器读是 0x83 而非 0x82（Solaar 的 `0x8100 | 0x2B5` 中，长寄存器值的 0x200 位使 0x81 进位为 0x83；0x82 是长写）。初版把长读当 0x82 发上了真机——接收器对该写入静默忽略，配对未受影响，但这是扫描路径上真实的写操作，与"扫描零寄存器写入"红线冲突。规则：任何新寄存器路径先以探针在真机上确认应答回显，再进适配器；混淆代码中的数字常量（含字符串数组解码残留）不能单独作为字段依据，必须以字段名为锚交叉验证。
 
+### 7.8 iKF Audio（Cm FF00 耳机线）
+
+来源：[PR #3](https://github.com/FoLeaf/Periph-In-One/pull/3) 作者对 iKF Audio 的 ProtocolHandler/HIDManager 静态分析，以及 2026-10-25 的 38B1:3419 V11 Pro 真机记录（70%）。
+
+匹配 `VID 38B1` + `FF00:0001`，不锁 PID；厂商 APO 驱动含 `3412/341E/3419` 多种人格。仅 V11 Pro 已实测，其余已实现未实测。复用既有 hidapi、双句柄与 output-report 传输，不增加依赖。
+
+输出为 64 字节 report ID 2，电量查询前缀 `02 55 80 00 06 00 FF <seq> 02 FA 0C AA`，其余零填充。输入 report ID 3 的短电量帧为 `03 55 80 00 08 00 FF <seq> 04 0C <level> 00 00 AA`。解析完整固定帧头、声明长度、属性和 AA 收尾，驱动核对查询序号；伴随的心跳 `01 FE` 不作为读数。电量保留作者确认的 1..=100 范围，0% 语义未验证；该短帧不声称具有已验证的 CRC 校验。
+
+发现使用接口元数据，不查询电量；显式读取才发 `{FA,0C}`。没有经验证的每台唯一身份命令，使用现有 USB 序列号/位置证据。超时返回结构化错误，不能证明设备不支持电量。
+
 ## 8. 独立 HAL 提取时的历史验证（2026-10-25）
 
 实施基线 `8b07ec9`，Windows x64 / Rust GNU 工具链。以下仅为独立库提取阶段记录；当时没有增加第三方依赖或改变应用配置结构，当前配置迁移见第 9 节。
@@ -191,6 +207,15 @@ v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与�
 - HAL 显式描述 `ComponentDescriptor`、`ComponentKey`、`ComponentClaim` 和 capability 的组件引用。应用使用 `SavedComponent` 绑定来源 route 到 persistent ID；唯一可靠 claim 跨来源/重连生效，同来源重复 claim 歧义和冲突强 claim 会保留分开的历史。`legacy/main` 保持每设备精确 ID `main`。
 - Windows workspace suite 中实际启动的 HAL、应用 unit、battery、core、migration suites 共 71 项通过；`tests/model.exe` 被 Windows 拒绝启动（os error 5），15 项只完成编译。相同模型 suite `--no-run` 成功，Clippy all-targets 与 fmt 通过。独立 HAL 在 Linux target 的 no-default-features / serde tests 编译通过，未在 Linux 运行测试。
 - 未做真机组件 claim 或多电池 GATT 验证；当前 Bluetooth/HID 适配只暴露协议确实可确认的电池组件。合成的耳机左右耳/盒子测试验证身份模型，不代表已有真机适配。
+
+## 11. PR #3 迁入当前 HAL 的验证（2026-10-26）
+
+基线 `34244c5`，保留 PR 作者的三个提交并按当前发现/能力边界迁入独立库，复用既有传输，无新增依赖。
+
+- Windows x64 / Rust GNU：fmt、workspace all-targets 测试和 Clippy（`-D warnings`）通过，94 项测试全部执行，包括第 10 节当时未能启动的 15 项 model 测试。
+- 新增 6 组可移植协议回归，覆盖 VXE 命令回显、状态、长度、校验和与边界，MCHOSE 型号、iKF 查询和作者捕获的应答、心跳、坏帧头及截断；关闭默认 features 和启用 serde 均执行通过。Linux target 的这两种配置全部测试编译检查通过，本地未执行 Linux 程序。
+- VXE 状态测试确认空接收器不标成不支持电量，且不会把旧 RF 身份归给当前离线外设。未修改应用核心、配置版本或组件历史规则。
+- 三组设备的真机档位沿用 PR 作者记录：F58E、MCHOSE G75、iKF V11 Pro 已实测，其余条目维持未实测；本轮软件回归不代表重新完成这三台设备的真机验收。
 
 ## 附录 A：KZZI 258A 有线型号表（已识别档）
 

@@ -2,9 +2,11 @@
 //! Wire codecs are shared with probes through `protocol`.
 mod atk;
 mod atk_v2;
+mod atk_v2_dongle;
 mod aula;
 mod bigbigwon;
 mod darkrim;
+mod ikf;
 mod kzzi;
 mod logitech;
 
@@ -60,7 +62,9 @@ pub trait VendorAdapter {
 pub const ADAPTERS: &[&dyn VendorAdapter] = &[
     &atk::AtkMouse,
     &atk_v2::AtkV2Mouse,
+    &atk_v2_dongle::AtkV2Dongle,
     &darkrim::DarkrimHeadset,
+    &ikf::IkfHeadset,
     &kzzi::KzziKeyboard,
     &bigbigwon::BigbigwonGamepad,
     &logitech::LogitechReceiver,

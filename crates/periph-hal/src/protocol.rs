@@ -68,6 +68,53 @@ pub fn atk_ff04_battery(report: &[u8]) -> Option<(u8, u8)> {
     (report[6] <= 100).then_some((report[6], report[7]))
 }
 
+/// ATK V2 family over the 2.4G dongle's FF02/2 interface (the receiver line
+/// of ATK V HUB's device table). Requests reuse `atk_ff04_request`: the same
+/// 16-byte frame with report id 8. Replies arrive as 17-byte input reports,
+/// wire-verified on the 3554:F58E 1K dongle: byte 1 echoes the command,
+/// byte 2 is the status (0 = answered with data), byte 4 the eeprom address,
+/// byte 5 the dataValidLen, data from byte 6, and byte 16 the checksum. The
+/// checksum rule equals the FF04 feature frame: 0x55 minus (report id plus
+/// the first 15 frame bytes), i.e. the sum of all 17 wire bytes is 0x55.
+pub fn atk_v2_ff02_reply_ok(report: &[u8]) -> bool {
+    report.len() == 17
+        && report[0] == 8
+        && report[5] <= 10
+        && report[..17]
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte))
+            == 0x55
+}
+
+/// (level, charging) from a GetBatteryLevel reply. commandStatus 0 and
+/// dataValidLen >= 1 gate the reading; level 0 stays rejected as unverified,
+/// mirroring the kzzi family, until a live 0% capture proves it real.
+pub fn atk_v2_ff02_battery(report: &[u8]) -> Option<(u8, u8)> {
+    if !atk_v2_ff02_reply_ok(report) || report[1] != 0x04 || report[2] != 0 || report[5] == 0 {
+        return None;
+    }
+    let (level, charging) = (report[6], report[7]);
+    ((1..=100).contains(&level)).then_some((level, charging))
+}
+
+/// (mouseOnline, rf id) from a GetWirelessMouseOnline reply. The rf id spans
+/// bytes 7..10 regardless of dataValidLen, mirroring the vendor's reader.
+pub fn atk_v2_ff02_online(report: &[u8]) -> Option<(u8, [u8; 3])> {
+    if !atk_v2_ff02_reply_ok(report) || report[1] != 0x03 || report[2] != 0 {
+        return None;
+    }
+    Some((report[6], [report[7], report[8], report[9]]))
+}
+
+/// (cid, mid, unique) from a GetMouseCIDMID reply. The vendor checks model
+/// consistency against the expected CID/MID pair; unique is a third byte.
+pub fn atk_v2_ff02_cid_mid(report: &[u8]) -> Option<(u8, u8, u8)> {
+    if !atk_v2_ff02_reply_ok(report) || report[1] != 0x10 || report[2] != 0 || report[5] < 3 {
+        return None;
+    }
+    Some((report[6], report[7], report[8]))
+}
+
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc = 0xffff_u16;
     for &byte in data {
@@ -188,9 +235,12 @@ pub fn kzzi_battery(report: &[u8]) -> Option<(u8, u8)> {
     ((1..=100).contains(&level)).then_some((level, state))
 }
 
-/// Model names keyed by the profile signature recorded in the vendor driver's
-/// device profiles (Dev/*/KB.ini Psd= hex values, names from Cfg.ini DevName).
-pub fn kzzi_model_name(psd: &[u8]) -> Option<&'static str> {
+/// Model names keyed by the profile signature recorded in the vendor drivers'
+/// device profiles (KZZI KB.ini Psd= hex values, names from Cfg.ini DevName;
+/// MCHOSE HUB YProduct.xml Productpassword). The Compx 2.4G receiver is an OEM
+/// line shared across brands (KZZI, AULA, MCHOSE), so one table carries
+/// their name spaces.
+pub fn compx_model_name(psd: &[u8]) -> Option<&'static str> {
     Some(match psd {
         [2, 0, 0, 0, 0, 54] => "Kzzi-K75 RGB",
         [2, 0, 0, 0, 0, 55] => "Kzzi-K75 RGB key",
@@ -215,8 +265,26 @@ pub fn kzzi_model_name(psd: &[u8]) -> Option<&'static str> {
         [3, 0, 0, 0, 5, 62] => "Kzzi-i98",
         [6, 0, 0, 0, 0, 1] => "Kzzi-Z98",
         [6, 0, 0, 0, 0, 29] => "Kzzi-K21",
+        // MCHOSE HUB YProduct.xml Productpassword values (G75 live-verified
+        // on the 3554:FA09 receiver; the rest share the receiver per the
+        // driver's device table and stay unverified).
+        [3, 0, 0, 0, 0, 119] => "MCHOSE K99",
+        [3, 0, 0, 0, 0, 214] => "MCHOSE X75",
+        [3, 0, 0, 0, 1, 50] => "MCHOSE G98",
+        [3, 0, 0, 0, 1, 21] => "MCHOSE G75",
+        [3, 0, 0, 0, 1, 53] => "MCHOSE K87",
+        [3, 0, 0, 0, 1, 116] => "MCHOSE GX87",
+        [3, 0, 0, 0, 1, 198] => "MCHOSE X75 V2",
+        [3, 0, 0, 0, 1, 199] => "MCHOSE KX75",
+        [3, 0, 0, 0, 1, 223] => "MCHOSE K99 V2",
+        [3, 0, 0, 0, 1, 237] => "MCHOSE GX87 V2",
         _ => return None,
     })
+}
+
+/// Compatibility name for probes written before the shared Compx model table.
+pub fn kzzi_model_name(psd: &[u8]) -> Option<&'static str> {
+    compx_model_name(psd)
 }
 
 /// PSDs of models verified live to keep their battery private: the 0x4A
@@ -603,4 +671,35 @@ pub fn aula_command_battery(report: &[u8], cmd: u8) -> Option<(u8, u8)> {
     }
     let (level, state) = (frame[8], frame[9]);
     ((1..=100).contains(&level)).then_some((level, state))
+}
+
+/// iKF/Cm headset wire protocol on the FF00/1 interface (38B1 VID, reverse
+/// engineered from iKF Audio's ProtocolHandler and verified live on the
+/// 38B1:3419 V11 Pro). Output reports are 64 bytes with report id 2; the
+/// battery query carries the FF-framed command {FA, 0C} - 0xFF, seq, length,
+/// payload, 0xAA trailer - wrapped in the 55/80 header.
+pub fn ikf_battery_query(seq: u8) -> [u8; 64] {
+    let mut report = [0; 64];
+    report[..12].copy_from_slice(&[
+        0x02, 0x55, 0x80, 0x00, 0x06, 0x00, 0xFF, seq, 0x02, 0xFA, 0x0C, 0xAA,
+    ]);
+    report
+}
+
+/// Battery level from a GetProperty reply. The device answers on the input
+/// pipe with report id 3: 55/80 header, total length, 0xFF, echo seq, then
+/// the FF-framed payload {04, 0C, level, 0, 0} closed by 0xAA. Property 0x0C
+/// is the battery property the official app polls with {FA, 0C}. Level 0
+/// stays rejected as unverified, mirroring the other families.
+pub fn ikf_battery(report: &[u8]) -> Option<u8> {
+    if report.len() < 14
+        || report[..7] != [0x03, 0x55, 0x80, 0x00, 0x08, 0x00, 0xFF]
+        || report[8] != 0x04
+        || report[9] != 0x0C
+        || report[13] != 0xAA
+    {
+        return None;
+    }
+    let level = report[10];
+    ((1..=100).contains(&level)).then_some(level)
 }
