@@ -1,13 +1,14 @@
 //! Battery observations are one optional domain contract, not device-core data.
 use crate::{
-    Backend, Capability, DEFAULT_OPERATION_TIMEOUT, DeviceFacts, ErrorKind, HardwareError,
+    Backend, BackendExecutor, BackendOperation, Capability, DEFAULT_OPERATION_TIMEOUT, DeviceFacts,
+    ErrorKind, HardwareError,
 };
 use std::{
     any::Any,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError},
+        mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -79,7 +80,7 @@ where
 pub struct Battery {
     operation: Arc<Mutex<Option<Arc<BatteryOperation>>>>,
     valid: Arc<AtomicBool>,
-    executor: Option<Arc<dyn BatteryExecutor>>,
+    executor: Option<Arc<dyn BackendExecutor>>,
 }
 
 type LocalBatteryReader =
@@ -109,14 +110,6 @@ impl BatteryOperation {
     }
 }
 
-pub(crate) trait BatteryExecutor: Send + Sync {
-    fn request(
-        &self,
-        operation: Arc<BatteryOperation>,
-        valid: Arc<AtomicBool>,
-    ) -> BatteryReadRequest;
-}
-
 /// A queued battery operation. Scheduling is nonblocking; callers choose a
 /// bounded wait appropriate to their refresh policy.
 pub struct BatteryReadRequest {
@@ -134,6 +127,19 @@ impl BatteryReadRequest {
         cancelled: &AtomicBool,
     ) -> Result<BatteryReading, HardwareError> {
         self.wait_inner(timeout, Some(cancelled))
+    }
+
+    /// Return a completed result without blocking. `None` means the worker has
+    /// not completed the request yet.
+    pub fn try_take(&self) -> Option<Result<BatteryReading, HardwareError>> {
+        match self.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Disconnected) => Some(Err(HardwareError::new(
+                ErrorKind::Unavailable,
+                "battery operation was cancelled",
+            ))),
+            Err(TryRecvError::Empty) => None,
+        }
     }
 
     fn wait_inner(
@@ -253,7 +259,41 @@ impl Battery {
             )));
         };
         if let Some(executor) = &self.executor {
-            executor.request(operation, self.valid.clone())
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let valid = self.valid.clone();
+            let job_executor = executor.clone();
+            let run: BackendOperation = Box::new(move |backend| {
+                let result = if !valid.load(Ordering::Acquire) || !job_executor.is_current() {
+                    Err(HardwareError::new(
+                        ErrorKind::Unavailable,
+                        "battery capability has expired",
+                    ))
+                } else {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        operation.read(backend)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(HardwareError::new(
+                            ErrorKind::Unavailable,
+                            "battery capability panicked",
+                        ))
+                    })
+                };
+                let result = if valid.load(Ordering::Acquire) && job_executor.is_current() {
+                    result
+                } else {
+                    Err(HardwareError::new(
+                        ErrorKind::Unavailable,
+                        "battery result belongs to an expired discovery round",
+                    ))
+                };
+                let _ = sender.send(result);
+            });
+            if let Err(error) = executor.enqueue(run) {
+                BatteryReadRequest::ready(Err(error))
+            } else {
+                BatteryReadRequest::from_receiver(receiver)
+            }
         } else {
             BatteryReadRequest::ready(operation.read_without_backend())
         }
@@ -285,7 +325,7 @@ impl Battery {
         operation.read_without_backend()
     }
 
-    pub(crate) fn routed(&self, executor: Arc<dyn BatteryExecutor>) -> Self {
+    pub(crate) fn routed(&self, executor: Arc<dyn BackendExecutor>) -> Self {
         Self {
             operation: self.operation.clone(),
             valid: self.valid.clone(),
@@ -306,5 +346,12 @@ impl Capability for Battery {
     const VERSION: u16 = 2;
     fn invalidate(&self) {
         self.close();
+    }
+
+    fn bind_executor(
+        &self,
+        executor: Arc<dyn BackendExecutor>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
+        Some(Arc::new(self.routed(executor)))
     }
 }

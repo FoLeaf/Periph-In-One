@@ -1,8 +1,18 @@
-use crate::{
-    ErrorKind, HardwareError,
-    battery::{Battery, BatteryExecutor},
-};
+use crate::{ErrorKind, HardwareError};
 use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
+
+type CapabilityValue = dyn Any + Send + Sync;
+type ExecutorBinder =
+    fn(&CapabilityValue, Arc<dyn BackendExecutor>) -> Option<Arc<CapabilityValue>>;
+
+/// A typed domain task sent to the backend's own worker. The type-erased
+/// boundary stays inside the HAL and capability implementation.
+pub type BackendOperation = Box<dyn FnOnce(&mut dyn Any) + Send>;
+
+pub trait BackendExecutor: Send + Sync {
+    fn enqueue(&self, operation: BackendOperation) -> Result<(), HardwareError>;
+    fn is_current(&self) -> bool;
+}
 
 /// Implement in a capability module or downstream crate, without changing core.
 /// Values may be immutable observations or typed clients for separate sessions.
@@ -11,6 +21,14 @@ pub trait Capability: Any + Send + Sync {
     const VERSION: u16 = 1;
     /// Revoke live clients before rediscovery or backend shutdown.
     fn invalidate(&self) {}
+    /// Bind a live client to its owner thread. Immutable capabilities keep the
+    /// default implementation.
+    fn bind_executor(
+        &self,
+        _executor: Arc<dyn BackendExecutor>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,8 +42,16 @@ pub struct CapabilityDescriptor {
 #[derive(Clone)]
 struct Entry {
     descriptor: CapabilityDescriptor,
-    value: Arc<dyn Any + Send + Sync>,
-    invalidate: fn(&(dyn Any + Send + Sync)),
+    value: Arc<CapabilityValue>,
+    invalidate: fn(&CapabilityValue),
+    bind_executor: ExecutorBinder,
+}
+
+fn bind<C: Capability>(
+    value: &(dyn Any + Send + Sync),
+    executor: Arc<dyn BackendExecutor>,
+) -> Option<Arc<dyn Any + Send + Sync>> {
+    value.downcast_ref::<C>()?.bind_executor(executor)
 }
 
 /// Type erasure is confined here. Consumers only register/get concrete contracts;
@@ -69,6 +95,7 @@ impl Capabilities {
                         value.invalidate();
                     }
                 },
+                bind_executor: bind::<C>,
             },
         );
         Ok(())
@@ -91,13 +118,10 @@ impl Capabilities {
         }
     }
 
-    pub(crate) fn route_batteries(&mut self, executor: Arc<dyn BatteryExecutor>) {
+    pub(crate) fn bind_executor(&mut self, executor: Arc<dyn BackendExecutor>) {
         for entry in self.entries.values_mut() {
-            let routed = entry.value.downcast_ref::<Battery>().map(|battery| {
-                Arc::new(battery.routed(executor.clone())) as Arc<dyn Any + Send + Sync>
-            });
-            if let Some(routed) = routed {
-                entry.value = routed;
+            if let Some(bound) = (entry.bind_executor)(entry.value.as_ref(), executor.clone()) {
+                entry.value = bound;
             }
         }
     }

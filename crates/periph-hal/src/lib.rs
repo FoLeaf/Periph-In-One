@@ -10,13 +10,18 @@ mod error;
 mod hardware;
 pub mod protocol;
 
-pub use capability::{Capabilities, Capability, CapabilityDescriptor};
+pub use capability::{
+    BackendExecutor, BackendOperation, Capabilities, Capability, CapabilityDescriptor,
+};
 pub use device::{
     Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, HardwareIdentifier, Identity,
     IdentityKind, Link,
 };
 pub use error::{ErrorKind, HardwareError};
-pub use hardware::{Backend, BackendFailure, Hardware, Inventory, Snapshot};
+pub use hardware::{
+    Backend, BackendDiscoveryUpdate, BackendFailure, DiscoveryPoll, DiscoveryStream, Hardware,
+    Inventory, Snapshot,
+};
 
 /// Default deadline for one backend or capability operation batch.
 pub const DEFAULT_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);

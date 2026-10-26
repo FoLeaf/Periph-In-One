@@ -1,9 +1,10 @@
 use periph_hal::{
-    Backend, Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind,
-    Hardware, HardwareError,
+    Backend, BackendExecutor, BackendOperation, Capabilities, Capability, Connection, Device,
+    DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind, Hardware, HardwareError,
     battery::{Battery, BatteryReading, BatteryState, Percent, Sample, SampleOrigin},
 };
 use std::{
+    any::Any,
     cell::Cell,
     rc::Rc,
     sync::{
@@ -56,6 +57,51 @@ struct LocalBackend {
     state: Rc<Cell<u8>>,
 }
 
+#[derive(Clone)]
+struct LocalCounter {
+    executor: Option<Arc<dyn BackendExecutor>>,
+}
+
+impl Capability for LocalCounter {
+    const ID: &'static str = "test.local-counter";
+
+    fn bind_executor(
+        &self,
+        executor: Arc<dyn BackendExecutor>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
+        Some(Arc::new(Self {
+            executor: Some(executor),
+        }))
+    }
+}
+
+impl LocalCounter {
+    fn read(&self) -> Result<u8, HardwareError> {
+        let executor = self
+            .executor
+            .as_ref()
+            .ok_or_else(|| HardwareError::new(ErrorKind::Unavailable, "counter is not bound"))?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let operation: BackendOperation = Box::new(move |backend: &mut dyn Any| {
+            let result = backend
+                .downcast_mut::<LocalBackend>()
+                .map(|backend| {
+                    let value = backend.state.get();
+                    backend.state.set(value + 1);
+                    value
+                })
+                .ok_or_else(|| {
+                    HardwareError::new(ErrorKind::Conflict, "counter backend type mismatch")
+                });
+            let _ = reply.send(result);
+        });
+        executor.enqueue(operation)?;
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| HardwareError::new(ErrorKind::Timeout, "counter operation timed out"))?
+    }
+}
+
 impl Backend for LocalBackend {
     fn id(&self) -> &str {
         "test.local"
@@ -79,6 +125,7 @@ impl Backend for LocalBackend {
                 Ok(reading_level(next))
             }),
         )?;
+        capabilities.insert("count", LocalCounter { executor: None })?;
         Ok(vec![device(
             descriptor("test.local", "camera", "camera"),
             capabilities,
@@ -115,6 +162,19 @@ fn factory_builds_a_non_send_backend_on_its_worker() {
             matches!(reading.state, BatteryState::Value(sample) if sample.level.get() == expected)
         );
     }
+    assert_eq!(
+        snapshot.devices[0]
+            .capabilities
+            .get::<LocalCounter>("count")
+            .unwrap()
+            .read()
+            .unwrap(),
+        3
+    );
+    let inventory = hardware.inventory();
+    assert_eq!(inventory.completed, ["test.local"]);
+    let reading = battery.read().unwrap();
+    assert!(matches!(reading.state, BatteryState::Value(sample) if sample.level.get() == 5));
 }
 
 struct MismatchedLocalBackend;
@@ -254,6 +314,46 @@ fn slow_backend_times_out_without_hiding_fast_or_late_results() {
 }
 
 #[test]
+fn discovery_stream_reports_fast_backend_before_blocked_peer() {
+    let (release_tx, release_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, _finished_rx) = mpsc::channel();
+    let mut hardware = Hardware::new();
+    hardware.set_operation_timeout(Duration::from_secs(2));
+    hardware
+        .register_factory("test.slow", move || SlowBackend {
+            release: release_rx,
+            started: started_tx,
+            finished: finished_tx,
+            calls: 0,
+        })
+        .unwrap();
+    hardware
+        .register_factory("test.fast", || FastBackend)
+        .unwrap();
+
+    let mut stream = hardware.discovery_stream();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let mut fast_name = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while fast_name.is_none() && std::time::Instant::now() < deadline {
+        match stream.poll() {
+            periph_hal::DiscoveryPoll::Update(update) if update.backend == "test.fast" => {
+                fast_name = update.result.ok().and_then(|devices| {
+                    devices.first().map(|device| device.descriptor.name.clone())
+                });
+            }
+            periph_hal::DiscoveryPoll::Pending => thread::sleep(Duration::from_millis(2)),
+            periph_hal::DiscoveryPoll::Update(_) | periph_hal::DiscoveryPoll::Complete => {}
+        }
+    }
+    assert_eq!(fast_name.as_deref(), Some("fast result"));
+    drop(stream);
+    drop(hardware);
+    release_tx.send(()).unwrap();
+}
+
+#[test]
 fn caller_cancellation_releases_a_blocked_discovery_wait() {
     let (release_tx, release_rx) = mpsc::channel();
     let (started_tx, started_rx) = mpsc::channel();
@@ -280,8 +380,8 @@ fn caller_cancellation_releases_a_blocked_discovery_wait() {
     let snapshot = hardware.discover_cancellable(&cancelled);
     cancel_thread.join().unwrap();
     assert!(started_at.elapsed() < Duration::from_secs(1));
-    assert_eq!(snapshot.failures.len(), 1);
-    assert_eq!(snapshot.failures[0].error.kind, ErrorKind::Unavailable);
+    assert!(snapshot.failures.is_empty());
+    assert!(snapshot.devices.is_empty());
 
     // Hardware drop shuts down its mailbox without joining the blocked worker.
     let drop_started_at = std::time::Instant::now();

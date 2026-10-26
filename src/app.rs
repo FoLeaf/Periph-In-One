@@ -28,7 +28,8 @@ pub enum Action {
     InitialShow,
     Refresh,
     ReadingStarted,
-    Readings(Result<ScanReport, String>),
+    ReadingsProgress(ScanReport, u64),
+    ReadingsFinished(Result<bool, String>),
     Show,
     Expand,
     Hide,
@@ -301,18 +302,17 @@ impl App {
                 self.busy = true;
                 self.ui.set_busy(true);
             }
-            Action::Readings(result) => {
+            Action::ReadingsProgress(report, observed_at) => {
+                self.devices =
+                    hardware::merge_report(&self.devices, &mut self.batteries, report, observed_at);
+                self.persist("");
+                self.update();
+            }
+            Action::ReadingsFinished(result) => {
                 self.busy = false;
                 self.ui.set_busy(false);
                 match result {
-                    Ok(report) => {
-                        let partial = !report.snapshot.failures.is_empty();
-                        self.devices = hardware::merge_report(
-                            &self.devices,
-                            &mut self.batteries,
-                            report,
-                            now(),
-                        );
+                    Ok(partial) => {
                         self.ui.set_updated(
                             format!("上次刷新 {}", Local::now().format("%H:%M:%S")).into(),
                         );
@@ -706,11 +706,23 @@ pub fn run() -> Result<(), String> {
                 .map_err(|_| "当前系统没有可用的设备后端".to_string());
             loop {
                 post(Action::ReadingStarted);
-                let report = match hardware.as_mut() {
-                    Ok(hardware) => Ok(devices::refresh_cancellable(hardware, &worker_cancel)),
+                let result = match hardware.as_mut() {
+                    Ok(hardware) => {
+                        let observed_at = now();
+                        let mut refresh = hardware::RefreshSession::new(hardware, &worker_cancel);
+                        while !refresh.is_done() {
+                            if let Some(report) = refresh.poll() {
+                                post(Action::ReadingsProgress(report, observed_at));
+                            }
+                            if !refresh.is_done() {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                        Ok(refresh.has_failures())
+                    }
                     Err(error) => Err(error.clone()),
                 };
-                post(Action::Readings(report));
+                post(Action::ReadingsFinished(result));
                 match receiver.recv_timeout(Duration::from_secs(60)) {
                     Ok(WorkerCommand::Stop) | Err(RecvTimeoutError::Disconnected) => break,
                     Ok(WorkerCommand::Refresh) | Err(RecvTimeoutError::Timeout) => {}

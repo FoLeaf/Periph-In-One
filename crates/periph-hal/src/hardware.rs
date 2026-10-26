@@ -1,6 +1,6 @@
 use crate::{
-    Capabilities, DEFAULT_OPERATION_TIMEOUT, Device, DeviceDescriptor, ErrorKind, HardwareError,
-    battery::{BatteryExecutor, BatteryOperation, BatteryReadRequest},
+    BackendExecutor, BackendOperation, Capabilities, DEFAULT_OPERATION_TIMEOUT, Device,
+    DeviceDescriptor, ErrorKind, HardwareError,
 };
 use std::{
     any::Any,
@@ -16,7 +16,6 @@ use std::{
 };
 
 const MAX_PENDING_OPERATIONS: usize = 128;
-type WorkerOperation = Box<dyn FnOnce(&mut dyn Any) + Send>;
 
 /// A polling/discovery backend. Continuous domain data belongs to a typed
 /// capability session, not this inventory/snapshot interface.
@@ -41,11 +40,106 @@ pub struct Inventory {
     pub failures: Vec<BackendFailure>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Snapshot {
     pub devices: Vec<Device>,
     pub completed: Vec<String>,
     pub failures: Vec<BackendFailure>,
+}
+
+pub struct BackendDiscoveryUpdate {
+    pub backend: String,
+    pub result: Result<Vec<Device>, HardwareError>,
+}
+
+pub enum DiscoveryPoll {
+    Update(BackendDiscoveryUpdate),
+    Pending,
+    Complete,
+}
+
+/// Incremental discovery across registered backends. Polling checks every
+/// completed channel before waiting, so a slow earlier backend cannot hold up
+/// a later backend's result.
+pub struct DiscoveryStream<'a> {
+    hardware: &'a mut Hardware,
+    pending: Vec<(String, Receiver<Reply>)>,
+    deadline: Instant,
+    cancelled: Option<&'a AtomicBool>,
+    complete: bool,
+}
+
+impl DiscoveryStream<'_> {
+    pub fn poll(&mut self) -> DiscoveryPoll {
+        if self.complete {
+            return DiscoveryPoll::Complete;
+        }
+        if self
+            .cancelled
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        {
+            self.pending.clear();
+            self.complete = true;
+            return DiscoveryPoll::Complete;
+        }
+
+        for index in 0..self.pending.len() {
+            match self.pending[index].1.try_recv() {
+                Ok(reply) => {
+                    let (backend, _) = self.pending.remove(index);
+                    let result = match reply {
+                        Reply::Discover(Ok(devices)) => {
+                            self.hardware.live.insert(
+                                backend.clone(),
+                                devices
+                                    .iter()
+                                    .map(|device| device.capabilities.clone())
+                                    .collect(),
+                            );
+                            Ok(devices)
+                        }
+                        Reply::Discover(Err(error)) | Reply::Inventory(Err(error)) => Err(error),
+                        _ => Err(HardwareError::new(
+                            ErrorKind::InvalidResponse,
+                            "backend worker returned the wrong operation result",
+                        )),
+                    };
+                    return DiscoveryPoll::Update(BackendDiscoveryUpdate { backend, result });
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let (backend, _) = self.pending.remove(index);
+                    return DiscoveryPoll::Update(BackendDiscoveryUpdate {
+                        backend,
+                        result: Err(HardwareError::new(
+                            ErrorKind::Unavailable,
+                            "backend worker stopped before returning a result",
+                        )),
+                    });
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if self.pending.is_empty() {
+            self.complete = true;
+            return DiscoveryPoll::Complete;
+        }
+        if Instant::now() >= self.deadline {
+            let (backend, _) = self.pending.remove(0);
+            return DiscoveryPoll::Update(BackendDiscoveryUpdate {
+                backend,
+                result: Err(HardwareError::new(
+                    ErrorKind::Timeout,
+                    "backend operation exceeded its deadline",
+                )),
+            });
+        }
+        DiscoveryPoll::Pending
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -67,7 +161,7 @@ enum Task {
     },
     Capability {
         generation: u64,
-        run: WorkerOperation,
+        run: BackendOperation,
     },
 }
 
@@ -92,7 +186,12 @@ impl WorkerShared {
         }
     }
 
-    fn query(&self, generation: u64, kind: QueryKind) -> Result<Receiver<Reply>, HardwareError> {
+    fn query(
+        &self,
+        generation: u64,
+        kind: QueryKind,
+        supersede: bool,
+    ) -> Result<Receiver<Reply>, HardwareError> {
         let (reply, receiver) = mpsc::sync_channel(1);
         let mut state = self.state.lock().map_err(|_| {
             HardwareError::new(ErrorKind::Unavailable, "backend operation queue poisoned")
@@ -103,10 +202,22 @@ impl WorkerShared {
                 "backend worker is shutting down",
             ));
         }
-        self.generation.store(generation, Ordering::Release);
-        // A new round supersedes queued work. An already-running native call
-        // cannot be safely interrupted, but its result is generation-checked.
-        state.tasks.clear();
+        if supersede {
+            self.generation.store(generation, Ordering::Release);
+            // Rediscovery supersedes queued work. An already-running native
+            // call cannot be safely interrupted, but its result is checked.
+            state.tasks.clear();
+        } else if self.generation.load(Ordering::Acquire) != generation {
+            return Err(HardwareError::new(
+                ErrorKind::Unavailable,
+                "inventory generation is stale",
+            ));
+        } else if state.tasks.len() >= MAX_PENDING_OPERATIONS {
+            return Err(HardwareError::new(
+                ErrorKind::Unavailable,
+                "backend operation queue is full",
+            ));
+        }
         state.tasks.push_back(Task::Query {
             generation,
             kind,
@@ -116,7 +227,7 @@ impl WorkerShared {
         Ok(receiver)
     }
 
-    fn capability(&self, generation: u64, run: WorkerOperation) -> Result<(), HardwareError> {
+    fn capability(&self, generation: u64, run: BackendOperation) -> Result<(), HardwareError> {
         let mut state = self.state.lock().map_err(|_| {
             HardwareError::new(ErrorKind::Unavailable, "backend operation queue poisoned")
         })?;
@@ -163,58 +274,26 @@ struct BackendWorker {
     shared: Arc<WorkerShared>,
 }
 
-struct WorkerBatteryExecutor {
+struct WorkerExecutor {
     shared: Weak<WorkerShared>,
     generation: u64,
 }
 
-impl BatteryExecutor for WorkerBatteryExecutor {
-    fn request(
-        &self,
-        operation: Arc<BatteryOperation>,
-        valid: Arc<std::sync::atomic::AtomicBool>,
-    ) -> BatteryReadRequest {
+impl BackendExecutor for WorkerExecutor {
+    fn enqueue(&self, operation: BackendOperation) -> Result<(), HardwareError> {
         let Some(shared) = self.shared.upgrade() else {
-            return BatteryReadRequest::ready(Err(HardwareError::new(
+            return Err(HardwareError::new(
                 ErrorKind::Unavailable,
                 "backend worker has stopped",
-            )));
+            ));
         };
-        let (reply, receiver) = mpsc::sync_channel(1);
-        let job_shared = shared.clone();
-        let generation = self.generation;
-        let run = Box::new(move |backend: &mut dyn Any| {
-            let result = if !valid.load(Ordering::Acquire)
-                || job_shared.generation.load(Ordering::Acquire) != generation
-            {
-                Err(HardwareError::new(
-                    ErrorKind::Unavailable,
-                    "battery capability has expired",
-                ))
-            } else {
-                catch_unwind(AssertUnwindSafe(|| operation.read(backend))).unwrap_or_else(|_| {
-                    Err(HardwareError::new(
-                        ErrorKind::Unavailable,
-                        "battery capability panicked",
-                    ))
-                })
-            };
-            let result = if valid.load(Ordering::Acquire)
-                && job_shared.generation.load(Ordering::Acquire) == generation
-            {
-                result
-            } else {
-                Err(HardwareError::new(
-                    ErrorKind::Unavailable,
-                    "battery result belongs to an expired discovery round",
-                ))
-            };
-            let _ = reply.send(result);
-        });
-        if let Err(error) = shared.capability(self.generation, run) {
-            return BatteryReadRequest::ready(Err(error));
-        }
-        BatteryReadRequest::from_receiver(receiver)
+        shared.capability(self.generation, operation)
+    }
+
+    fn is_current(&self) -> bool {
+        self.shared
+            .upgrade()
+            .is_some_and(|shared| shared.generation.load(Ordering::Acquire) == self.generation)
     }
 }
 
@@ -281,15 +360,15 @@ impl BackendWorker {
                                                 ))
                                             })
                                             .map(|mut devices| {
-                                                let executor: Arc<dyn BatteryExecutor> =
-                                                    Arc::new(WorkerBatteryExecutor {
+                                                let executor: Arc<dyn BackendExecutor> =
+                                                    Arc::new(WorkerExecutor {
                                                         shared: Arc::downgrade(&thread_shared),
                                                         generation,
                                                     });
                                                 for device in &mut devices {
                                                     device
                                                         .capabilities
-                                                        .route_batteries(executor.clone());
+                                                        .bind_executor(executor.clone());
                                                 }
                                                 Reply::Discover(Ok(devices))
                                             })
@@ -349,8 +428,13 @@ impl BackendWorker {
         Ok(Self { shared })
     }
 
-    fn query(&self, generation: u64, kind: QueryKind) -> Result<Receiver<Reply>, HardwareError> {
-        self.shared.query(generation, kind)
+    fn query(
+        &self,
+        generation: u64,
+        kind: QueryKind,
+        supersede: bool,
+    ) -> Result<Receiver<Reply>, HardwareError> {
+        self.shared.query(generation, kind, supersede)
     }
 
     fn close(&self) {
@@ -465,7 +549,7 @@ impl Hardware {
     }
 
     pub fn inventory(&mut self) -> Inventory {
-        let generation = self.next_generation();
+        let generation = self.generation;
         let deadline = Instant::now() + self.operation_timeout;
         let mut pending = Vec::<(String, Result<Receiver<Reply>, Reply>)>::new();
         for registration in &mut self.backends {
@@ -473,7 +557,7 @@ impl Hardware {
                 Runner::Worker(worker) => pending.push((
                     registration.id.clone(),
                     worker
-                        .query(generation, QueryKind::Inventory)
+                        .query(generation, QueryKind::Inventory, false)
                         .map_err(|error| Reply::Inventory(Err(error))),
                 )),
                 Runner::Inline(backend) => pending.push((
@@ -505,16 +589,32 @@ impl Hardware {
     }
 
     pub fn discover(&mut self) -> Snapshot {
-        self.discover_inner(None)
+        let stream = self.discovery_stream_inner(None);
+        collect_discovery(stream)
     }
 
     /// Discover while allowing a caller to stop waiting without joining or
     /// interrupting a native operation already running on a backend worker.
     pub fn discover_cancellable(&mut self, cancelled: &AtomicBool) -> Snapshot {
-        self.discover_inner(Some(cancelled))
+        let stream = self.discovery_stream_inner(Some(cancelled));
+        collect_discovery(stream)
     }
 
-    fn discover_inner(&mut self, cancelled: Option<&AtomicBool>) -> Snapshot {
+    pub fn discovery_stream(&mut self) -> DiscoveryStream<'_> {
+        self.discovery_stream_inner(None)
+    }
+
+    pub fn discovery_stream_cancellable<'a>(
+        &'a mut self,
+        cancelled: &'a AtomicBool,
+    ) -> DiscoveryStream<'a> {
+        self.discovery_stream_inner(Some(cancelled))
+    }
+
+    fn discovery_stream_inner<'a>(
+        &'a mut self,
+        cancelled: Option<&'a AtomicBool>,
+    ) -> DiscoveryStream<'a> {
         let generation = self.next_generation();
         let deadline = Instant::now() + self.operation_timeout;
         for capabilities in self.live.values().flatten() {
@@ -522,48 +622,48 @@ impl Hardware {
         }
         self.live.clear();
 
-        let mut pending = Vec::<(String, Result<Receiver<Reply>, Reply>)>::new();
+        let mut pending = Vec::<(String, Receiver<Reply>)>::new();
         for registration in &mut self.backends {
             match &mut registration.runner {
-                Runner::Worker(worker) => pending.push((
-                    registration.id.clone(),
-                    worker
-                        .query(generation, QueryKind::Discover)
-                        .map_err(|error| Reply::Discover(Err(error))),
-                )),
+                Runner::Worker(worker) => {
+                    let receiver = worker
+                        .query(generation, QueryKind::Discover, true)
+                        .unwrap_or_else(|error| ready_receiver(Reply::Discover(Err(error))));
+                    pending.push((registration.id.clone(), receiver));
+                }
                 Runner::Inline(backend) => pending.push((
                     registration.id.clone(),
-                    Ok(ready_receiver(Reply::Discover(backend.discover()))),
+                    ready_receiver(Reply::Discover(backend.discover())),
                 )),
             }
         }
-        let mut result = Snapshot::default();
-        for (id, response) in pending {
-            match receive_reply(response, deadline, cancelled) {
-                Reply::Discover(Ok(devices)) => {
-                    self.live.insert(
-                        id.clone(),
-                        devices
-                            .iter()
-                            .map(|device| device.capabilities.clone())
-                            .collect(),
-                    );
-                    result.devices.extend(devices);
-                    result.completed.push(id);
-                }
-                Reply::Discover(Err(error)) | Reply::Inventory(Err(error)) => {
-                    result.failures.push(BackendFailure { backend: id, error })
-                }
-                _ => result.failures.push(BackendFailure {
-                    backend: id,
-                    error: HardwareError::new(
-                        ErrorKind::InvalidResponse,
-                        "backend worker returned the wrong operation result",
-                    ),
-                }),
-            }
+        DiscoveryStream {
+            hardware: self,
+            pending,
+            deadline,
+            cancelled,
+            complete: false,
         }
-        result
+    }
+}
+
+fn collect_discovery(mut stream: DiscoveryStream<'_>) -> Snapshot {
+    let mut snapshot = Snapshot::default();
+    loop {
+        match stream.poll() {
+            DiscoveryPoll::Update(update) => match update.result {
+                Ok(devices) => {
+                    snapshot.devices.extend(devices);
+                    snapshot.completed.push(update.backend);
+                }
+                Err(error) => snapshot.failures.push(BackendFailure {
+                    backend: update.backend,
+                    error,
+                }),
+            },
+            DiscoveryPoll::Pending => thread::sleep(Duration::from_millis(5)),
+            DiscoveryPoll::Complete => return snapshot,
+        }
     }
 }
 
