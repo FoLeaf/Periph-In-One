@@ -162,6 +162,11 @@ export component AppWindow inherits Window {
     in property <bool> busy;
     in-out property <bool> settings-open;
     in-out property <bool> autostart;
+    in property <string> app-version;
+    in-out property <bool> automatic-update;
+    in property <bool> update-working;
+    in property <bool> update-ready;
+    in property <string> update-status;
     in-out property <bool> editing;
     in-out property <bool> deleting;
     in-out property <string> deleting-id;
@@ -187,6 +192,8 @@ export component AppWindow inherits Window {
     callback copy-hardware-id(string);
     callback delete-device(string);
     callback toggle-autostart(bool);
+    callback toggle-update(bool);
+    callback check-update();
 
     if root.mini-mode: MiniPanel {
         width: 100%;
@@ -248,7 +255,7 @@ export component AppWindow inherits Window {
 
         if root.settings-open: Rectangle {
             x: max(16px, (parent.width - 360px) / 2); y: max(24px, (parent.height - self.height) / 2);
-            width: min(parent.width - 32px, 360px); height: 142px;
+            width: min(parent.width - 32px, 360px); height: min(parent.height - 48px, 270px);
             border-radius: 16px; background: #ffffff;
             TouchArea { clicked => {} }
             ScrollView {
@@ -257,6 +264,12 @@ export component AppWindow inherits Window {
                 padding: 22px; spacing: 12px;
                 HorizontalLayout { Text { text: "设置"; font-size: 20px; font-weight: 600; color: #18181b; } IconButton { icon: @image-url("../assets/close.svg"); label: "关闭设置"; clicked => { root.settings-open = false; } } }
                 CheckBox { text: "开机启动"; checked <=> root.autostart; toggled => { root.toggle-autostart(self.checked); } }
+                CheckBox { text: "自动更新"; checked <=> root.automatic-update; toggled => { root.toggle-update(self.checked); } }
+                HorizontalLayout {
+                    Text { text: "版本 " + root.app-version; color: #64646e; vertical-alignment: center; }
+                    Button { text: "检查更新"; enabled: !root.update-working; clicked => { root.check-update(); } }
+                }
+                if root.update-status != "": Text { text: root.update-status; color: #64646e; font-size: 12px; wrap: word-wrap; }
             }
             }
         }

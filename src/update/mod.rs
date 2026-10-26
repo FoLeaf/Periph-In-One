@@ -1,5 +1,9 @@
 //! Application update policy and verified packages; HAL has no update dependencies.
 pub mod package;
+pub mod scheduler;
+pub mod storage;
+#[cfg(windows)]
+pub mod worker;
 
 pub const APP_ID: &str = "io.github.FoLeaf.PeriphInOne";
 pub const TARGET: &str = "x86_64-pc-windows-msvc";

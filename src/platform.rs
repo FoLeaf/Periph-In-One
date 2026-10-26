@@ -2,6 +2,7 @@ use crate::{
     AppWindow,
     app::{Action, post},
 };
+pub mod update;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{ComponentHandle, winit_030::WinitWindowAccessor};
 use std::{

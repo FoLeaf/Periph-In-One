@@ -7,6 +7,7 @@ use periph_in_one::{
     hardware::{self, ScanReport},
     model::{self, Device},
     presentation,
+    update::worker::{self as updater, Command as UpdateCommand, Event as UpdateEvent},
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
@@ -43,6 +44,9 @@ pub enum Action {
     Delete(String),
     Saved(u64, Result<(), String>),
     Autostart(bool),
+    Update(UpdateEvent),
+    AutomaticUpdate(bool),
+    CheckUpdate,
     Quit,
 }
 
@@ -82,6 +86,7 @@ struct App {
     busy: bool,
     rebind_ids: Vec<String>,
     presenter: platform::Presenter,
+    updater: Option<updater::Controller>,
 }
 
 fn now() -> u64 {
@@ -519,6 +524,30 @@ impl App {
                 }
                 self.ui.set_autostart(platform::autostart_enabled());
             }
+            Action::Update(event) => match event {
+                UpdateEvent::Status {
+                    message,
+                    working,
+                    automatic,
+                    ready,
+                } => {
+                    self.ui.set_update_status(message.into());
+                    self.ui.set_update_working(working);
+                    self.ui.set_automatic_update(automatic);
+                    self.ui.set_update_ready(ready);
+                }
+                UpdateEvent::Prepared(_) => {}
+            },
+            Action::AutomaticUpdate(enabled) => {
+                if let Some(updater) = &self.updater {
+                    updater.send(UpdateCommand::Automatic(enabled));
+                }
+            }
+            Action::CheckUpdate => {
+                if let Some(updater) = &self.updater {
+                    updater.send(UpdateCommand::Check);
+                }
+            }
             Action::Quit => {
                 self.save_size();
                 self.cancel.store(true, Ordering::Release);
@@ -665,8 +694,27 @@ pub fn run() -> Result<(), String> {
         busy: true,
         rebind_ids: vec![],
         presenter: platform::Presenter::default(),
+        updater: None,
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    let root = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("无法确定程序目录")?
+        .to_path_buf();
+    match updater::start(
+        root,
+        2,
+        updater::Host {
+            probe: platform::update::probe,
+            available_space: platform::update::available_space,
+            emit: |event| post(Action::Update(event)),
+        },
+    ) {
+        Ok(controller) => app.borrow_mut().updater = Some(controller),
+        Err(error) => ui.set_update_status(error.into()),
+    }
     ui.on_refresh(|| post(Action::Refresh));
     ui.on_hide_window(|| post(Action::Hide));
     ui.on_expand(|| post(Action::Expand));
@@ -682,6 +730,8 @@ pub fn run() -> Result<(), String> {
     ui.on_copy_hardware_id(|id| post(Action::CopyIds(id.into())));
     ui.on_delete_device(|id| post(Action::Delete(id.into())));
     ui.on_toggle_autostart(|enabled| post(Action::Autostart(enabled)));
+    ui.on_toggle_update(|enabled| post(Action::AutomaticUpdate(enabled)));
+    ui.on_check_update(|| post(Action::CheckUpdate));
     ui.window().on_close_requested(|| {
         post(Action::Hide);
         slint::CloseRequestResponse::KeepWindowShown

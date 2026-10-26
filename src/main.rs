@@ -10,6 +10,13 @@ mod platform;
 
 #[cfg(windows)]
 fn main() {
+    if let Some(result) = platform::update::internal_entry() {
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = app::run() {
         platform::error_dialog(&error);
     }
