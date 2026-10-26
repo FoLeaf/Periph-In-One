@@ -2,6 +2,7 @@
 use crate::hardware::{self, ScanReport};
 use periph_hal::{Hardware, HardwareIdentifier, Link};
 use serde::Serialize;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Serialize)]
 pub struct InventoryEntry {
@@ -31,7 +32,17 @@ pub fn enumerate_identifiers() -> Result<Vec<InventoryEntry>, String> {
 }
 
 pub fn refresh(hardware: &mut Hardware) -> ScanReport {
-    hardware::from_snapshot(hardware.discover())
+    let timeout = hardware.operation_timeout();
+    hardware::from_snapshot_with_timeout(hardware.discover(), timeout)
+}
+
+pub fn refresh_cancellable(hardware: &mut Hardware, cancelled: &AtomicBool) -> ScanReport {
+    let timeout = hardware.operation_timeout();
+    hardware::from_snapshot_cancellable(
+        hardware.discover_cancellable(cancelled),
+        timeout,
+        cancelled,
+    )
 }
 
 pub fn scan() -> Result<ScanReport, String> {

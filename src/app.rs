@@ -12,7 +12,10 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::mpsc::{self, RecvTimeoutError, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError, Sender},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -71,6 +74,7 @@ struct App {
     devices: Vec<Device>,
     batteries: Batteries,
     worker: Sender<WorkerCommand>,
+    cancel: std::sync::Arc<AtomicBool>,
     saver: Sender<SaveRequest>,
     save_revision: u64,
     save_notice: String,
@@ -517,6 +521,7 @@ impl App {
             }
             Action::Quit => {
                 self.save_size();
+                self.cancel.store(true, Ordering::Release);
                 let _ = self.worker.send(WorkerCommand::Stop);
                 let _ = slint::quit_event_loop();
             }
@@ -630,6 +635,7 @@ pub fn run() -> Result<(), String> {
     let tray = tray_icon()?;
     let (sender, receiver) = mpsc::channel();
     let (saver, saves) = mpsc::channel::<SaveRequest>();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
     // Keep durable atomic replacement, including sync_all, off the UI thread
     // and independent of slow HID queries. FIFO snapshots preserve edit order.
     let save_worker = thread::Builder::new()
@@ -652,6 +658,7 @@ pub fn run() -> Result<(), String> {
         devices: initial,
         batteries,
         worker: sender.clone(),
+        cancel: cancel.clone(),
         saver,
         save_revision: 0,
         save_notice: String::new(),
@@ -691,6 +698,7 @@ pub fn run() -> Result<(), String> {
     if !autostart {
         post(Action::InitialShow);
     }
+    let worker_cancel = cancel.clone();
     let worker = thread::Builder::new()
         .name("battery-reader".into())
         .spawn(move || {
@@ -699,7 +707,7 @@ pub fn run() -> Result<(), String> {
             loop {
                 post(Action::ReadingStarted);
                 let report = match hardware.as_mut() {
-                    Ok(hardware) => Ok(devices::refresh(hardware)),
+                    Ok(hardware) => Ok(devices::refresh_cancellable(hardware, &worker_cancel)),
                     Err(error) => Err(error.clone()),
                 };
                 post(Action::Readings(report));
@@ -711,6 +719,7 @@ pub fn run() -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     let result = slint::run_event_loop_until_quit().map_err(|e| e.to_string());
+    cancel.store(true, Ordering::Release);
     let _ = sender.send(WorkerCommand::Stop);
     APP.with(|slot| *slot.borrow_mut() = None);
     drop(app);

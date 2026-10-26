@@ -18,6 +18,9 @@ pub use device::{
 pub use error::{ErrorKind, HardwareError};
 pub use hardware::{Backend, BackendFailure, Hardware, Inventory, Snapshot};
 
+/// Default deadline for one backend or capability operation batch.
+pub const DEFAULT_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[cfg(all(windows, feature = "windows-backend"))]
 mod windows;
 #[cfg(all(windows, feature = "windows-backend"))]
@@ -30,8 +33,9 @@ impl Hardware {
         #[cfg(all(windows, feature = "windows-backend"))]
         {
             let mut hardware = Self::new();
-            hardware.register(windows::HidBackend)?;
-            hardware.register(windows::BluetoothAudioBackend)?;
+            hardware.register_factory("windows.hid", || windows::HidBackend)?;
+            hardware
+                .register_factory("windows.bluetooth.audio", || windows::BluetoothAudioBackend)?;
             Ok(hardware)
         }
         #[cfg(not(all(windows, feature = "windows-backend")))]

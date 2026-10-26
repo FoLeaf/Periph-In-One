@@ -1,4 +1,7 @@
-use crate::{ErrorKind, HardwareError};
+use crate::{
+    ErrorKind, HardwareError,
+    battery::{Battery, BatteryExecutor},
+};
 use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
 
 /// Implement in a capability module or downstream crate, without changing core.
@@ -85,6 +88,17 @@ impl Capabilities {
     pub(crate) fn invalidate(&self) {
         for entry in self.entries.values() {
             (entry.invalidate)(entry.value.as_ref());
+        }
+    }
+
+    pub(crate) fn route_batteries(&mut self, executor: Arc<dyn BatteryExecutor>) {
+        for entry in self.entries.values_mut() {
+            let routed = entry.value.downcast_ref::<Battery>().map(|battery| {
+                Arc::new(battery.routed(executor.clone())) as Arc<dyn Any + Send + Sync>
+            });
+            if let Some(routed) = routed {
+                entry.value = routed;
+            }
         }
     }
 }
