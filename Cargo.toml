@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/periph-hal"]
+members = ["crates/periph-hal", "tools/ota-lab"]
 resolver = "3"
 
 [package]
