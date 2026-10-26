@@ -1,4 +1,4 @@
-use crate::{ErrorKind, HardwareError};
+use crate::{ComponentKey, ErrorKind, HardwareError};
 use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
 
 type CapabilityValue = dyn Any + Send + Sync;
@@ -35,8 +35,8 @@ pub trait Capability: Any + Send + Sync {
 pub struct CapabilityDescriptor {
     pub id: &'static str,
     pub version: u16,
-    /// Source-local component key. An empty key addresses the device itself.
-    pub component: String,
+    /// Source-local component key. Legacy string keys use the `legacy` namespace.
+    pub component: ComponentKey,
 }
 
 #[derive(Clone)]
@@ -58,7 +58,7 @@ fn bind<C: Capability>(
 /// neither raw Any values nor string-dispatched commands cross this API.
 #[derive(Clone, Default)]
 pub struct Capabilities {
-    entries: BTreeMap<(&'static str, u16, String), Entry>,
+    entries: BTreeMap<(&'static str, u16, ComponentKey), Entry>,
 }
 
 impl Capabilities {
@@ -67,9 +67,21 @@ impl Capabilities {
         component: impl Into<String>,
         value: C,
     ) -> Result<(), HardwareError> {
-        let component = component.into();
+        self.insert_component(ComponentKey::legacy(component.into()), value)
+    }
+
+    /// Register a capability on a protocol-described component.
+    pub fn insert_component<C: Capability>(
+        &mut self,
+        component: ComponentKey,
+        value: C,
+    ) -> Result<(), HardwareError> {
         let key = (C::ID, C::VERSION, component.clone());
-        if C::ID.is_empty() || C::VERSION == 0 {
+        if C::ID.is_empty()
+            || C::VERSION == 0
+            || component.namespace.is_empty()
+            || component.value.is_empty()
+        {
             return Err(HardwareError::new(
                 ErrorKind::InvalidResponse,
                 "invalid capability contract",
@@ -103,7 +115,14 @@ impl Capabilities {
 
     pub fn get<C: Capability>(&self, component: &str) -> Option<&C> {
         self.entries
-            .get(&(C::ID, C::VERSION, component.to_owned()))?
+            .get(&(C::ID, C::VERSION, ComponentKey::legacy(component)))?
+            .value
+            .downcast_ref()
+    }
+
+    pub fn get_component<C: Capability>(&self, component: &ComponentKey) -> Option<&C> {
+        self.entries
+            .get(&(C::ID, C::VERSION, component.clone()))?
             .value
             .downcast_ref()
     }

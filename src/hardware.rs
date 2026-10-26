@@ -4,8 +4,8 @@ use crate::{
     model::{self, Device},
 };
 use periph_hal::{
-    BackendDiscoveryUpdate, Capability, CoverageScope, DiscoveryPoll, DiscoveryStream,
-    FailureScope, Hardware, OperationKind, ScopedFailure, Snapshot,
+    BackendDiscoveryUpdate, Capability, ComponentKey, CoverageScope, DiscoveryPoll,
+    DiscoveryStream, FailureScope, Hardware, OperationKind, ScopedFailure, Snapshot,
     battery::{Battery, BatteryReadRequest, BatteryState},
 };
 use std::{
@@ -23,13 +23,13 @@ pub struct ScanReport {
 fn record_capability_failure(
     snapshot: &mut Snapshot,
     key: &periph_hal::DeviceKey,
-    component: &str,
+    component: &ComponentKey,
     error: &periph_hal::HardwareError,
 ) {
     snapshot.scoped_failures.push(ScopedFailure {
         scope: FailureScope::Capability {
             device: key.clone(),
-            component: component.into(),
+            component: serde_json::to_string(component).unwrap_or_default(),
             id: Battery::ID.into(),
             version: Battery::VERSION,
         },
@@ -41,7 +41,7 @@ fn record_capability_failure(
 struct PendingBattery {
     device_index: usize,
     key: periph_hal::DeviceKey,
-    component: String,
+    component: ComponentKey,
     request: BatteryReadRequest,
 }
 
@@ -189,7 +189,7 @@ impl<'a> RefreshSession<'a> {
             .map(|capability| capability.component.clone())
             .collect();
         for component in components {
-            if let Some(battery) = device.capabilities.get::<Battery>(&component) {
+            if let Some(battery) = device.capabilities.get_component::<Battery>(&component) {
                 self.pending.push(PendingBattery {
                     device_index,
                     key: key.clone(),
@@ -245,7 +245,7 @@ fn from_snapshot_inner(
             .map(|capability| capability.component.clone())
             .collect();
         for component in components {
-            if let Some(battery) = device.capabilities.get::<Battery>(&component) {
+            if let Some(battery) = device.capabilities.get_component::<Battery>(&component) {
                 pending.push(PendingBattery {
                     device_index,
                     key: key.clone(),

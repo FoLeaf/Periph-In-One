@@ -265,6 +265,7 @@ fn collect(
                         backend: "windows.bluetooth.audio".into(),
                         local: format!("bt:{}", device.address),
                     },
+                    components: Vec::new(),
                     name: device.name.clone(),
                     roles: vec!["audio.headset".into()],
                     identifiers: device

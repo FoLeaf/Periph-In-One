@@ -1,6 +1,6 @@
 mod support;
 use periph_hal::{
-    Connection,
+    ComponentClaim, ComponentDescriptor, ComponentKey, Connection,
     battery::{BatteryState, SampleOrigin},
 };
 use periph_in_one::{battery::Batteries, hardware};
@@ -130,4 +130,104 @@ fn direct_reading_wins_over_cache_in_both_view_and_history() {
         assert_eq!(power.view(&offline[0].saved.id, "main").level, Some(80));
         assert!(!power.view(&offline[0].saved.id, "main").current);
     }
+}
+
+#[test]
+fn component_history_uses_persistent_binding_across_reconnection() {
+    let mut power = Batteries::default();
+    let mut first = device("bluetooth", "session-1", "headset-uid", "");
+    battery(&mut first, "left", Some(40));
+    first.descriptor.components.push(ComponentDescriptor {
+        key: ComponentKey::legacy("left"),
+        claims: vec![ComponentClaim {
+            namespace: "test.component.uid".into(),
+            value: "left-cell-uid".into(),
+        }],
+        ..ComponentDescriptor::default()
+    });
+    let records = hardware::merge_report(
+        &[],
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![first], &["bluetooth"])),
+        10,
+    );
+    let record_id = records[0].saved.id.clone();
+    let first_history = power
+        .saved
+        .iter()
+        .find(|record| record.device_id == record_id)
+        .unwrap()
+        .component
+        .clone();
+    assert_ne!(first_history, "left");
+    assert_eq!(power.view(&record_id, "left").level, Some(40));
+
+    let mut reconnected = device("bluetooth", "session-2", "headset-uid", "");
+    battery(&mut reconnected, "left", Some(58));
+    reconnected.descriptor.components.push(ComponentDescriptor {
+        key: ComponentKey::legacy("left"),
+        claims: vec![ComponentClaim {
+            namespace: "test.component.uid".into(),
+            value: "left-cell-uid".into(),
+        }],
+        ..ComponentDescriptor::default()
+    });
+    let records = hardware::merge_report(
+        &records,
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![reconnected], &["bluetooth"])),
+        20,
+    );
+    assert_eq!(records[0].saved.id, record_id);
+    let history: Vec<_> = power
+        .saved
+        .iter()
+        .filter(|record| record.device_id == record_id)
+        .collect();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].component, first_history);
+    assert_eq!(history[0].level, 58);
+    assert_eq!(power.view(&record_id, "left").level, Some(58));
+}
+
+#[test]
+fn component_id_remaps_are_scoped_to_the_owning_device() {
+    let mut power = Batteries::default();
+    power.saved = vec![
+        periph_in_one::battery::SavedBattery {
+            device_id: "device-a".into(),
+            component: "shared-id".into(),
+            level: 40,
+            observed_at: 10,
+        },
+        periph_in_one::battery::SavedBattery {
+            device_id: "device-b".into(),
+            component: "shared-id".into(),
+            level: 70,
+            observed_at: 20,
+        },
+    ];
+    let merge = periph_in_one::model::MergeResult {
+        devices: Vec::new(),
+        bindings: Default::default(),
+        merged_ids: Vec::new(),
+        component_bindings: Default::default(),
+        merged_component_ids: vec![("device-a".into(), "shared-id".into(), "main".into())],
+    };
+
+    power.apply(&[], &merge, 30);
+
+    assert!(
+        power
+            .saved
+            .iter()
+            .any(|record| record.device_id == "device-a" && record.component == "main")
+    );
+    assert!(
+        power
+            .saved
+            .iter()
+            .any(|record| record.device_id == "device-b" && record.component == "shared-id")
+    );
+    assert_eq!(power.saved.len(), 2);
 }

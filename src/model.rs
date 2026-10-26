@@ -1,7 +1,8 @@
 //! Device records and identity reconciliation. No battery state or platform rules.
 use periph_hal::{
-    Connection, CoverageScope, DeviceDescriptor, DeviceKey, EndpointKey, FailureScope,
-    HardwareError, Identity, IdentityKind, ScopedFailure, Snapshot,
+    ComponentClaim, ComponentDescriptor, ComponentKey, ComponentRoute, Connection, CoverageScope,
+    DeviceDescriptor, DeviceKey, EndpointKey, FailureScope, HardwareError, Identity, IdentityKind,
+    ScopedFailure, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -16,6 +17,7 @@ pub struct SavedDevice {
     /// Access endpoint for each route; old config files infer the primary route
     /// from its descriptor and leave joined legacy routes unknown.
     pub endpoint_routes: Vec<EndpointRoute>,
+    pub components: Vec<SavedComponent>,
     pub alias: String,
     pub identity_conflict: bool,
 }
@@ -25,6 +27,18 @@ pub struct SavedDevice {
 pub struct EndpointRoute {
     pub route: DeviceKey,
     pub endpoint: EndpointKey,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedComponent {
+    /// Opaque persistent component ID; battery history refers to this string.
+    pub id: String,
+    pub routes: Vec<ComponentRoute>,
+    pub parent: Option<String>,
+    pub roles: Vec<String>,
+    pub claims: Vec<ComponentClaim>,
+    pub identity_conflict: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -41,7 +55,15 @@ pub struct MergeResult {
     pub bindings: BTreeMap<DeviceKey, String>,
     /// Confirmed duplicate records; domains rebind their own history separately.
     pub merged_ids: Vec<(String, String)>,
+    /// Route-specific HAL component keys bound to persistent component IDs.
+    pub component_bindings: ComponentBindings,
+    /// Confirmed component record remaps, scoped by owning device ID.
+    pub merged_component_ids: Vec<ComponentIdRemap>,
 }
+
+pub type ComponentBindings = BTreeMap<ComponentRoute, String>;
+/// `(owner device ID, old component ID, canonical component ID)`.
+pub type ComponentIdRemap = (String, String, String);
 
 pub fn restore(saved: &[SavedDevice]) -> Vec<Device> {
     saved
@@ -231,6 +253,399 @@ fn failure_for_saved_route<'a>(
     None
 }
 
+fn observed_components(observation: &periph_hal::Device) -> Vec<ComponentDescriptor> {
+    let mut components = observation.descriptor.components.clone();
+    for capability in observation.capabilities.descriptors() {
+        if !components
+            .iter()
+            .any(|component| component.key == capability.component)
+        {
+            components.push(ComponentDescriptor {
+                key: capability.component.clone(),
+                ..ComponentDescriptor::default()
+            });
+        }
+    }
+    components
+}
+
+fn merge_component_descriptor(target: &mut ComponentDescriptor, prior: &ComponentDescriptor) {
+    if target.parent.is_none() {
+        target.parent = prior.parent.clone();
+    }
+    for role in &prior.roles {
+        if !target.roles.contains(role) {
+            target.roles.push(role.clone());
+        }
+    }
+    for claim in &prior.claims {
+        if !target.claims.contains(claim) {
+            target.claims.push(claim.clone());
+        }
+    }
+}
+
+fn component_claims_conflict(saved: &[ComponentClaim], incoming: &[ComponentClaim]) -> bool {
+    saved.iter().any(|old| {
+        incoming
+            .iter()
+            .any(|new| old.namespace == new.namespace && old.value != new.value)
+    })
+}
+
+fn component_has_claim(saved: &SavedComponent, claims: &[ComponentClaim]) -> bool {
+    claims.iter().any(|claim| saved.claims.contains(claim))
+}
+
+fn component_claim_id(claims: &[ComponentClaim]) -> String {
+    let mut claims = claims.to_vec();
+    claims.sort();
+    claims.dedup();
+    format!(
+        "component:claim:{}",
+        serde_json::to_string(&claims).unwrap()
+    )
+}
+
+fn component_route_id(route: &ComponentRoute, claims: &[ComponentClaim]) -> String {
+    let mut claims = claims.to_vec();
+    claims.sort();
+    claims.dedup();
+    format!(
+        "component:route:{}",
+        serde_json::to_string(&(route, claims)).unwrap()
+    )
+}
+
+fn merge_saved_component(target: &mut SavedComponent, absorbed: SavedComponent) {
+    for route in absorbed.routes {
+        if !target.routes.contains(&route) {
+            target.routes.push(route);
+        }
+    }
+    for role in absorbed.roles {
+        if !target.roles.contains(&role) {
+            target.roles.push(role);
+        }
+    }
+    for claim in absorbed.claims {
+        if !target.claims.contains(&claim) {
+            target.claims.push(claim);
+        }
+    }
+    if target.parent.is_none() {
+        target.parent = absorbed.parent;
+    }
+    target.identity_conflict |= absorbed.identity_conflict;
+}
+
+fn canonical_component_id(device_id: &str, id: &str, merged: &[ComponentIdRemap]) -> String {
+    let mut current = id.to_owned();
+    for _ in 0..=merged.len() {
+        let Some((_, _, next)) = merged
+            .iter()
+            .find(|(owner, old, _)| owner == device_id && old == &current)
+        else {
+            break;
+        };
+        if next == &current {
+            break;
+        }
+        current = next.clone();
+    }
+    current
+}
+
+fn merge_components(
+    devices: &mut [Device],
+    snapshot: &Snapshot,
+    device_bindings: &BTreeMap<DeviceKey, String>,
+) -> (ComponentBindings, Vec<ComponentIdRemap>) {
+    let mut claim_occupants =
+        HashMap::<(String, DeviceKey, ComponentClaim), HashSet<ComponentKey>>::new();
+    let mut ambiguous_claims = HashSet::<(String, ComponentClaim)>::new();
+    let mut seen_observations = HashSet::new();
+    for observation in &snapshot.devices {
+        if !seen_observations.insert(observation.descriptor.key.clone()) {
+            continue;
+        }
+        let Some(device_id) = device_bindings.get(&observation.descriptor.key) else {
+            continue;
+        };
+        for component in observed_components(observation) {
+            let unique_claims: HashSet<_> = component.claims.into_iter().collect();
+            for claim in unique_claims {
+                claim_occupants
+                    .entry((device_id.clone(), observation.descriptor.key.clone(), claim))
+                    .or_default()
+                    .insert(component.key.clone());
+            }
+        }
+    }
+    for ((device_id, _, claim), components) in claim_occupants {
+        if components.len() > 1 {
+            ambiguous_claims.insert((device_id, claim));
+        }
+    }
+
+    let mut component_bindings = BTreeMap::new();
+    let mut merged_components = Vec::new();
+    let mut pending_parents = Vec::<(String, ComponentRoute, Option<ComponentKey>)>::new();
+    seen_observations.clear();
+    for observation in &snapshot.devices {
+        let route_key = &observation.descriptor.key;
+        if !seen_observations.insert(route_key.clone()) {
+            continue;
+        }
+        let Some(device_id) = device_bindings.get(route_key) else {
+            continue;
+        };
+        let Some(device) = devices
+            .iter_mut()
+            .find(|device| device.saved.id == *device_id)
+        else {
+            continue;
+        };
+        for component in observed_components(observation) {
+            let route = ComponentRoute {
+                device: route_key.clone(),
+                component: component.key.clone(),
+            };
+            let route_candidates: Vec<_> = device
+                .saved
+                .components
+                .iter()
+                .enumerate()
+                .filter(|(_, saved)| {
+                    saved.routes.contains(&route)
+                        && !component_claims_conflict(&saved.claims, &component.claims)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let route_exists = device
+                .saved
+                .components
+                .iter()
+                .any(|saved| saved.routes.contains(&route));
+            let source_route_match = if route_candidates.len() == 1 {
+                route_candidates.first().copied()
+            } else {
+                None
+            };
+            let legacy_main = component.key == ComponentKey::legacy("main");
+            let route_match = if legacy_main {
+                if let Some(index) = device
+                    .saved
+                    .components
+                    .iter()
+                    .position(|saved| saved.id == "main")
+                {
+                    Some(index)
+                } else if let Some(index) = source_route_match {
+                    let old_id = device.saved.components[index].id.clone();
+                    if old_id != "main" {
+                        device.saved.components[index].id = "main".into();
+                        merged_components.push((device_id.clone(), old_id, "main".into()));
+                    }
+                    Some(index)
+                } else {
+                    None
+                }
+            } else {
+                source_route_match
+            };
+
+            let unique_claims: Vec<_> = component
+                .claims
+                .iter()
+                .filter(|claim| {
+                    !legacy_main
+                        && !ambiguous_claims.contains(&(device_id.clone(), (*claim).clone()))
+                })
+                .collect();
+            let mut claim_evidence = HashMap::<usize, HashSet<ComponentClaim>>::new();
+            for claim in unique_claims {
+                let mut matching_components = Vec::new();
+                for (index, saved) in device.saved.components.iter().enumerate() {
+                    if component_has_claim(saved, std::slice::from_ref(claim))
+                        && !component_claims_conflict(&saved.claims, &component.claims)
+                    {
+                        matching_components.push(index);
+                    }
+                }
+                if matching_components.len() == 1 {
+                    claim_evidence
+                        .entry(matching_components[0])
+                        .or_default()
+                        .insert((*claim).clone());
+                }
+            }
+            let claim_candidates: HashSet<_> = claim_evidence.keys().copied().collect();
+            let claim_match = (!legacy_main && claim_candidates.len() == 1)
+                .then(|| *claim_candidates.iter().next().unwrap());
+            let confirmed_merge_indices: Vec<_> = route_match
+                .filter(|route_index| claim_evidence.contains_key(route_index))
+                .map(|route_index| {
+                    claim_evidence
+                        .keys()
+                        .copied()
+                        .filter(|index| {
+                            *index == route_index
+                                || !component_claims_conflict(
+                                    &device.saved.components[route_index].claims,
+                                    &device.saved.components[*index].claims,
+                                )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let index = match (route_match, claim_match) {
+                (Some(route_index), _) if confirmed_merge_indices.len() > 1 => {
+                    let target_id = device.saved.components[route_index].id.clone();
+                    let mut absorbed_indices: Vec<_> = confirmed_merge_indices
+                        .into_iter()
+                        .filter(|index| *index != route_index)
+                        .collect();
+                    absorbed_indices.sort_unstable_by(|left, right| right.cmp(left));
+                    let mut target_index = route_index;
+                    for absorbed_index in absorbed_indices {
+                        let absorbed = device.saved.components.remove(absorbed_index);
+                        if absorbed_index < target_index {
+                            target_index -= 1;
+                        }
+                        if absorbed.id != target_id {
+                            merged_components.push((
+                                device_id.clone(),
+                                absorbed.id.clone(),
+                                target_id.clone(),
+                            ));
+                        }
+                        merge_saved_component(&mut device.saved.components[target_index], absorbed);
+                    }
+                    target_index
+                }
+                (Some(route_index), Some(claim_index)) if route_index != claim_index => {
+                    // A source route can be reused or can previously have had
+                    // no component identity evidence. A strong claim to another
+                    // saved component changes this route's binding, but does not
+                    // prove that the old and new component histories are one.
+                    device.saved.components[route_index]
+                        .routes
+                        .retain(|saved_route| saved_route != &route);
+                    device.saved.components[route_index].identity_conflict = true;
+                    device.saved.components[claim_index].identity_conflict = true;
+                    claim_index
+                }
+                (Some(route_index), _) => route_index,
+                (None, Some(claim_index)) => claim_index,
+                (None, None) => {
+                    let unique_claims: Vec<_> = component
+                        .claims
+                        .iter()
+                        .filter(|claim| {
+                            !legacy_main
+                                && !ambiguous_claims
+                                    .contains(&(device_id.clone(), (*claim).clone()))
+                        })
+                        .cloned()
+                        .collect();
+                    let id = if component.key == ComponentKey::legacy("main")
+                        && !device
+                            .saved
+                            .components
+                            .iter()
+                            .any(|saved| saved.id == "main")
+                    {
+                        "main".to_owned()
+                    } else if !unique_claims.is_empty()
+                        && claim_candidates.is_empty()
+                        && route_candidates.is_empty()
+                    {
+                        component_claim_id(&unique_claims)
+                    } else {
+                        component_route_id(&route, &component.claims)
+                    };
+                    let id = if device.saved.components.iter().any(|saved| saved.id == id) {
+                        format!("{id}|route:{}", serde_json::to_string(&route).unwrap())
+                    } else {
+                        id
+                    };
+                    device.saved.components.push(SavedComponent {
+                        id,
+                        routes: vec![route.clone()],
+                        parent: None,
+                        roles: component.roles.clone(),
+                        claims: component.claims.clone(),
+                        identity_conflict: (route_exists && route_candidates.is_empty())
+                            || claim_candidates.len() > 1,
+                    });
+                    device.saved.components.len() - 1
+                }
+            };
+
+            let saved = &mut device.saved.components[index];
+            if !saved.routes.contains(&route) {
+                saved.routes.push(route.clone());
+            }
+            for role in &component.roles {
+                if !saved.roles.contains(role) {
+                    saved.roles.push(role.clone());
+                }
+            }
+            for claim in &component.claims {
+                if !saved.claims.contains(claim) {
+                    saved.claims.push(claim.clone());
+                }
+            }
+            pending_parents.push((device_id.clone(), route.clone(), component.parent.clone()));
+            component_bindings.insert(route, saved.id.clone());
+        }
+    }
+
+    for (device_id, route, parent_key) in pending_parents {
+        let Some(parent_key) = parent_key else {
+            continue;
+        };
+        let parent_route = ComponentRoute {
+            device: route.device.clone(),
+            component: parent_key,
+        };
+        let Some(parent_id) = component_bindings.get(&parent_route).cloned() else {
+            continue;
+        };
+        if parent_id == component_bindings[&route] {
+            continue;
+        }
+        if let Some(device) = devices
+            .iter_mut()
+            .find(|device| device.saved.id == device_id)
+            && let Some(component) = device
+                .saved
+                .components
+                .iter_mut()
+                .find(|component| component.id == component_bindings[&route])
+        {
+            component.parent = Some(parent_id);
+        }
+    }
+
+    for (route, id) in &mut component_bindings {
+        if let Some(device_id) = device_bindings.get(&route.device) {
+            *id = canonical_component_id(device_id, id, &merged_components);
+        }
+    }
+    for device in devices {
+        let device_id = device.saved.id.clone();
+        for component in &mut device.saved.components {
+            if let Some(parent) = component.parent.as_mut() {
+                *parent = canonical_component_id(&device_id, parent, &merged_components);
+            }
+        }
+    }
+    (component_bindings, merged_components)
+}
+
 /// Reconcile facts from completed sources only. A missing/failed source leaves
 /// its known devices unknown; it cannot authoritatively declare them offline.
 pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
@@ -394,6 +809,19 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                         devices[index].saved.endpoint_routes.push(mapping);
                     }
                 }
+                let old_components = std::mem::take(&mut devices[other].saved.components);
+                for component in old_components {
+                    if let Some(existing) = devices[index]
+                        .saved
+                        .components
+                        .iter_mut()
+                        .find(|existing| existing.id == component.id)
+                    {
+                        merge_saved_component(existing, component);
+                    } else {
+                        devices[index].saved.components.push(component);
+                    }
+                }
                 remove.push(other);
             }
             let removed_before = remove.iter().filter(|&&other| other < index).count();
@@ -438,6 +866,7 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
             });
         }
         let mut updated = descriptor.clone();
+        updated.components = observed_components(observation);
         if already_seen {
             for role in &device.saved.descriptor.roles {
                 if !updated.roles.contains(role) {
@@ -452,6 +881,17 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
             for link in &device.saved.descriptor.links {
                 if !updated.links.contains(link) {
                     updated.links.push(link.clone());
+                }
+            }
+            for prior in &device.saved.descriptor.components {
+                if let Some(component) = updated
+                    .components
+                    .iter_mut()
+                    .find(|component| component.key == prior.key)
+                {
+                    merge_component_descriptor(component, prior);
+                } else {
+                    updated.components.push(prior.clone());
                 }
             }
         }
@@ -494,10 +934,14 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
             }
         }
     }
+    let (component_bindings, merged_component_ids) =
+        merge_components(&mut devices, snapshot, &bindings);
     MergeResult {
         devices,
         bindings,
         merged_ids,
+        component_bindings,
+        merged_component_ids,
     }
 }
 
@@ -533,4 +977,427 @@ pub fn rebind(devices: &mut [Device], from: &str, to: &str) -> Result<(), &'stat
     }
     devices[target].saved.alias = std::mem::take(&mut devices[source].saved.alias);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use periph_hal::{Capabilities, ComponentClaim, Device as HalDevice, DeviceDescriptor};
+
+    fn component(key: &str, claim: Option<&str>) -> ComponentDescriptor {
+        ComponentDescriptor {
+            key: ComponentKey::new("fake.protocol.component", key),
+            claims: claim
+                .map(|value| {
+                    vec![ComponentClaim {
+                        namespace: "fake.protocol.component-uid".into(),
+                        value: value.into(),
+                    }]
+                })
+                .unwrap_or_default(),
+            ..ComponentDescriptor::default()
+        }
+    }
+
+    fn observation(backend: &str, local: &str, components: Vec<ComponentDescriptor>) -> HalDevice {
+        observation_with_uid(backend, local, "headset-uid-1", components)
+    }
+
+    fn observation_with_uid(
+        backend: &str,
+        local: &str,
+        uid: &str,
+        components: Vec<ComponentDescriptor>,
+    ) -> HalDevice {
+        HalDevice {
+            descriptor: DeviceDescriptor {
+                key: DeviceKey {
+                    backend: backend.into(),
+                    local: local.into(),
+                },
+                name: "Synthetic headset".into(),
+                identities: vec![Identity {
+                    namespace: "fake.headset".into(),
+                    kind: IdentityKind::UnitId,
+                    subject: "device".into(),
+                    value: uid.into(),
+                }],
+                components,
+                ..DeviceDescriptor::default()
+            },
+            connection: Connection::Connected,
+            capabilities: Capabilities::default(),
+            issue: None,
+        }
+    }
+
+    fn snapshot(devices: Vec<HalDevice>) -> Snapshot {
+        Snapshot {
+            devices,
+            ..Snapshot::default()
+        }
+    }
+
+    fn component_id(result: &MergeResult, device: &DeviceKey, key: &str) -> String {
+        result
+            .component_bindings
+            .get(&ComponentRoute {
+                device: device.clone(),
+                component: if key == "main" {
+                    ComponentKey::legacy(key)
+                } else {
+                    ComponentKey::new("fake.protocol.component", key)
+                },
+            })
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn legacy_main_is_the_shared_root_component_for_merged_sources() {
+        let first_key = DeviceKey {
+            backend: "fake.bluetooth".into(),
+            local: "headset".into(),
+        };
+        let second_key = DeviceKey {
+            backend: "fake.hid".into(),
+            local: "receiver/slot-1".into(),
+        };
+        let result = merge_snapshot(
+            &[],
+            &snapshot(vec![
+                observation(
+                    "fake.bluetooth",
+                    "headset",
+                    vec![ComponentDescriptor {
+                        key: ComponentKey::legacy("main"),
+                        ..ComponentDescriptor::default()
+                    }],
+                ),
+                observation(
+                    "fake.hid",
+                    "receiver/slot-1",
+                    vec![ComponentDescriptor {
+                        key: ComponentKey::legacy("main"),
+                        ..ComponentDescriptor::default()
+                    }],
+                ),
+            ]),
+        );
+
+        assert_eq!(component_id(&result, &first_key, "main"), "main");
+        assert_eq!(component_id(&result, &second_key, "main"), "main");
+        let saved = result
+            .devices
+            .iter()
+            .find(|device| device.saved.id == result.bindings[&first_key])
+            .unwrap();
+        assert_eq!(
+            saved
+                .saved
+                .components
+                .iter()
+                .filter(|component| component.id == "main")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unique_claims_bind_components_across_sources_and_reordering() {
+        let left = component("gatt:bat-3", Some("cell-left-uid"));
+        let right = component("gatt:bat-1", Some("cell-right-uid"));
+        let case = component("gatt:bat-2", Some("case-uid"));
+        let first = merge_snapshot(
+            &[],
+            &snapshot(vec![
+                observation(
+                    "fake.bluetooth",
+                    "headset",
+                    vec![left.clone(), right.clone(), case.clone()],
+                ),
+                observation(
+                    "fake.hid",
+                    "receiver/slot-1",
+                    vec![
+                        component("power-port:case", Some("case-uid")),
+                        component("power-port:right", Some("cell-right-uid")),
+                        component("power-port:left", Some("cell-left-uid")),
+                    ],
+                ),
+            ]),
+        );
+        let bluetooth = DeviceKey {
+            backend: "fake.bluetooth".into(),
+            local: "headset".into(),
+        };
+        let hid = DeviceKey {
+            backend: "fake.hid".into(),
+            local: "receiver/slot-1".into(),
+        };
+        let stable_ids = [
+            component_id(&first, &bluetooth, "gatt:bat-3"),
+            component_id(&first, &bluetooth, "gatt:bat-1"),
+            component_id(&first, &bluetooth, "gatt:bat-2"),
+        ];
+        assert_eq!(component_id(&first, &hid, "power-port:left"), stable_ids[0]);
+        assert_eq!(
+            component_id(&first, &hid, "power-port:right"),
+            stable_ids[1]
+        );
+        assert_eq!(component_id(&first, &hid, "power-port:case"), stable_ids[2]);
+
+        let reconnected = DeviceKey {
+            backend: "fake.bluetooth".into(),
+            local: "headset-session-2".into(),
+        };
+        let second = merge_snapshot(
+            &first.devices,
+            &snapshot(vec![observation(
+                "fake.bluetooth",
+                "headset-session-2",
+                vec![
+                    component("gatt:bat-2", Some("case-uid")),
+                    component("gatt:bat-1", Some("cell-right-uid")),
+                    component("gatt:bat-3", Some("cell-left-uid")),
+                ],
+            )]),
+        );
+        assert_eq!(
+            component_id(&second, &reconnected, "gatt:bat-3"),
+            stable_ids[0]
+        );
+        assert_eq!(
+            component_id(&second, &reconnected, "gatt:bat-1"),
+            stable_ids[1]
+        );
+        assert_eq!(
+            component_id(&second, &reconnected, "gatt:bat-2"),
+            stable_ids[2]
+        );
+    }
+
+    #[test]
+    fn missing_or_ambiguous_claims_do_not_merge_component_histories() {
+        let no_claims = merge_snapshot(
+            &[],
+            &snapshot(vec![
+                observation("fake.bluetooth", "a", vec![component("channel-a", None)]),
+                observation("fake.hid", "b", vec![component("channel-b", None)]),
+            ]),
+        );
+        assert_ne!(
+            component_id(
+                &no_claims,
+                &DeviceKey {
+                    backend: "fake.bluetooth".into(),
+                    local: "a".into(),
+                },
+                "channel-a"
+            ),
+            component_id(
+                &no_claims,
+                &DeviceKey {
+                    backend: "fake.hid".into(),
+                    local: "b".into(),
+                },
+                "channel-b"
+            )
+        );
+
+        let duplicate_claim = component("first", Some("duplicated-uid"));
+        let ambiguous = merge_snapshot(
+            &[],
+            &snapshot(vec![observation(
+                "fake.bluetooth",
+                "one-device",
+                vec![duplicate_claim, component("second", Some("duplicated-uid"))],
+            )]),
+        );
+        assert_ne!(
+            component_id(
+                &ambiguous,
+                &DeviceKey {
+                    backend: "fake.bluetooth".into(),
+                    local: "one-device".into(),
+                },
+                "first"
+            ),
+            component_id(
+                &ambiguous,
+                &DeviceKey {
+                    backend: "fake.bluetooth".into(),
+                    local: "one-device".into(),
+                },
+                "second"
+            )
+        );
+    }
+
+    #[test]
+    fn a_new_strong_claim_takes_over_a_route_without_absorbing_old_history() {
+        let first = merge_snapshot(
+            &[],
+            &snapshot(vec![
+                observation("fake.slot", "slot-1", vec![component("battery", None)]),
+                observation(
+                    "fake.identity",
+                    "stable-source",
+                    vec![component("uid-route", Some("new-cell-uid"))],
+                ),
+            ]),
+        );
+        let slot_route = DeviceKey {
+            backend: "fake.slot".into(),
+            local: "slot-1".into(),
+        };
+        let identity_route = DeviceKey {
+            backend: "fake.identity".into(),
+            local: "stable-source".into(),
+        };
+        let old_history_id = component_id(&first, &slot_route, "battery");
+        let trusted_id = component_id(&first, &identity_route, "uid-route");
+        assert_ne!(old_history_id, trusted_id);
+
+        let second = merge_snapshot(
+            &first.devices,
+            &snapshot(vec![observation(
+                "fake.slot",
+                "slot-1",
+                vec![component("battery", Some("new-cell-uid"))],
+            )]),
+        );
+        assert_eq!(component_id(&second, &slot_route, "battery"), trusted_id);
+        assert!(!second.merged_component_ids.contains(&(
+            second.bindings[&slot_route].clone(),
+            old_history_id.clone(),
+            trusted_id.clone()
+        )));
+        let device = second
+            .devices
+            .iter()
+            .find(|device| device.saved.id == second.bindings[&slot_route])
+            .unwrap();
+        assert!(
+            device
+                .saved
+                .components
+                .iter()
+                .any(|component| component.id == old_history_id)
+        );
+    }
+
+    #[test]
+    fn independent_unique_claims_merge_component_records_with_device_scope() {
+        let first_a = DeviceKey {
+            backend: "fake.bluetooth".into(),
+            local: "device-a/session-a".into(),
+        };
+        let first_b = DeviceKey {
+            backend: "fake.hid".into(),
+            local: "device-a/receiver-slot".into(),
+        };
+        let second_a = DeviceKey {
+            backend: "fake.bluetooth".into(),
+            local: "device-b/session-a".into(),
+        };
+        let second_b = DeviceKey {
+            backend: "fake.hid".into(),
+            local: "device-b/receiver-slot".into(),
+        };
+        let claim_a = ComponentClaim {
+            namespace: "test.component.uid-a".into(),
+            value: "cell-a".into(),
+        };
+        let claim_b = ComponentClaim {
+            namespace: "test.component.uid-b".into(),
+            value: "cell-b".into(),
+        };
+        let first = merge_snapshot(
+            &[],
+            &snapshot(vec![
+                observation_with_uid(
+                    "fake.bluetooth",
+                    &first_a.local,
+                    "device-a-uid",
+                    vec![ComponentDescriptor {
+                        key: ComponentKey::new("fake.protocol.component", "first-route"),
+                        claims: vec![claim_a.clone()],
+                        ..ComponentDescriptor::default()
+                    }],
+                ),
+                observation_with_uid(
+                    "fake.hid",
+                    &first_b.local,
+                    "device-a-uid",
+                    vec![ComponentDescriptor {
+                        key: ComponentKey::new("fake.protocol.component", "second-route"),
+                        claims: vec![claim_b.clone()],
+                        ..ComponentDescriptor::default()
+                    }],
+                ),
+                observation_with_uid(
+                    "fake.bluetooth",
+                    &second_a.local,
+                    "device-b-uid",
+                    vec![ComponentDescriptor {
+                        key: ComponentKey::new("fake.protocol.component", "first-route"),
+                        claims: vec![claim_a.clone()],
+                        ..ComponentDescriptor::default()
+                    }],
+                ),
+                observation_with_uid(
+                    "fake.hid",
+                    &second_b.local,
+                    "device-b-uid",
+                    vec![ComponentDescriptor {
+                        key: ComponentKey::new("fake.protocol.component", "second-route"),
+                        claims: vec![claim_b.clone()],
+                        ..ComponentDescriptor::default()
+                    }],
+                ),
+            ]),
+        );
+        let device_a_id = first.bindings[&first_a].clone();
+        let device_b_id = first.bindings[&second_a].clone();
+        assert_ne!(device_a_id, device_b_id);
+        let component_a_id = component_id(&first, &first_a, "first-route");
+        let component_b_id = component_id(&first, &first_b, "second-route");
+        assert_eq!(
+            component_a_id,
+            component_id(&first, &second_a, "first-route")
+        );
+        assert_eq!(
+            component_b_id,
+            component_id(&first, &second_b, "second-route")
+        );
+        assert_ne!(component_a_id, component_b_id);
+
+        let incoming = observation_with_uid(
+            "fake.bluetooth",
+            &first_a.local,
+            "device-a-uid",
+            vec![ComponentDescriptor {
+                key: ComponentKey::new("fake.protocol.component", "first-route"),
+                claims: vec![claim_a, claim_b],
+                ..ComponentDescriptor::default()
+            }],
+        );
+        let merged = merge_snapshot(&first.devices, &snapshot(vec![incoming]));
+        assert!(merged.merged_component_ids.contains(&(
+            device_a_id.clone(),
+            component_b_id.clone(),
+            component_a_id.clone()
+        )));
+        assert!(
+            !merged
+                .merged_component_ids
+                .iter()
+                .any(|(owner, _, _)| owner == &device_b_id)
+        );
+        assert_eq!(
+            canonical_component_id(&device_b_id, &component_b_id, &merged.merged_component_ids),
+            component_b_id
+        );
+    }
 }

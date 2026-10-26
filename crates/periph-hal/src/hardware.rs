@@ -207,6 +207,17 @@ impl DiscoveryStream<'_> {
                     let (backend, _) = self.pending.remove(index);
                     let result = match reply {
                         Reply::Discover(Ok(report)) => {
+                            let mut report = report;
+                            for device in &mut report.devices {
+                                let keys: Vec<_> = device
+                                    .capabilities
+                                    .descriptors()
+                                    .map(|capability| capability.component.clone())
+                                    .collect();
+                                for key in keys {
+                                    device.descriptor.include_capability_component(key);
+                                }
+                            }
                             self.hardware.live.insert(
                                 backend.clone(),
                                 report

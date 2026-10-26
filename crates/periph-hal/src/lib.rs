@@ -14,8 +14,9 @@ pub use capability::{
     BackendExecutor, BackendOperation, Capabilities, Capability, CapabilityDescriptor,
 };
 pub use device::{
-    Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, EndpointKey, HardwareIdentifier,
-    Identity, IdentityKind, Link,
+    ComponentClaim, ComponentDescriptor, ComponentKey, ComponentRoute, Connection, Device,
+    DeviceDescriptor, DeviceFacts, DeviceKey, EndpointKey, HardwareIdentifier, Identity,
+    IdentityKind, Link,
 };
 pub use error::{ErrorKind, HardwareError};
 pub use hardware::{

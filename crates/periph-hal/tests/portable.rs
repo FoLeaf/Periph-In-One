@@ -1,7 +1,7 @@
 use periph_hal::{
-    Backend, Capabilities, Capability, Connection, CoverageScope, Device, DeviceDescriptor,
-    DeviceKey, DiscoveryReport, EndpointKey, ErrorKind, FailureScope, Hardware, HardwareError,
-    OperationKind, ScopedFailure,
+    Backend, Capabilities, Capability, ComponentDescriptor, ComponentKey, Connection,
+    CoverageScope, Device, DeviceDescriptor, DeviceKey, DiscoveryReport, EndpointKey, ErrorKind,
+    FailureScope, Hardware, HardwareError, OperationKind, ScopedFailure,
     battery::{Battery, BatteryState, Percent},
 };
 
@@ -21,6 +21,7 @@ fn descriptor() -> DeviceDescriptor {
             local: "camera-1".into(),
         },
         endpoint: Default::default(),
+        components: Vec::new(),
         name: "Camera".into(),
         roles: vec!["video.capture".into()],
         identifiers: vec![],
@@ -185,6 +186,37 @@ fn components_and_capability_ownership_are_independent() {
             .unwrap_err()
             .kind,
         ErrorKind::Conflict
+    );
+}
+
+#[test]
+fn capability_and_device_descriptor_share_a_protocol_component_key() {
+    let left = ComponentKey::new("fake.gatt.battery", "instance:9a");
+    let mut descriptor = descriptor();
+    descriptor.components.push(ComponentDescriptor {
+        key: left.clone(),
+        parent: Some(ComponentKey::new("fake.device", "headset")),
+        roles: vec!["audio.left".into()],
+        claims: vec![periph_hal::ComponentClaim {
+            namespace: "fake.gatt.battery-uid".into(),
+            value: "cell-left-uid".into(),
+        }],
+    });
+    let mut capabilities = Capabilities::default();
+    capabilities
+        .insert_component(left.clone(), CameraControl { exposure: 12 })
+        .unwrap();
+
+    assert_eq!(
+        descriptor.components[0].key,
+        capabilities.descriptors().next().unwrap().component
+    );
+    assert_eq!(
+        capabilities
+            .get_component::<CameraControl>(&left)
+            .unwrap()
+            .exposure,
+        12
     );
 }
 

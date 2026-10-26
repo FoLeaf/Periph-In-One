@@ -2,10 +2,11 @@
 use crate::{
     battery::SavedBattery,
     config::Config,
-    model::{EndpointRoute, SavedDevice},
+    model::{EndpointRoute, SavedComponent, SavedDevice},
 };
 use periph_hal::{
-    DeviceDescriptor, DeviceKey, EndpointKey, HardwareIdentifier, Identity, IdentityKind, Link,
+    ComponentDescriptor, ComponentKey, ComponentRoute, DeviceDescriptor, DeviceKey, EndpointKey,
+    HardwareIdentifier, Identity, IdentityKind, Link,
 };
 use serde::Deserialize;
 
@@ -209,9 +210,11 @@ pub(crate) fn version_one(bytes: &[u8]) -> Result<Config, serde_json::Error> {
                 route: key.clone(),
                 endpoint: endpoint.clone(),
             }],
+            components: Vec::new(),
             descriptor: DeviceDescriptor {
                 key,
                 endpoint,
+                components: Vec::new(),
                 target,
                 name: old.hardware_name,
                 roles: vec![role.into()],
@@ -299,5 +302,115 @@ pub(crate) fn normalize_v2(config: &mut Config) {
                 endpoint,
             });
         }
+        let legacy_main = ComponentKey::legacy("main");
+        if !saved
+            .descriptor
+            .components
+            .iter()
+            .any(|component| component.key == legacy_main)
+        {
+            saved.descriptor.components.push(ComponentDescriptor {
+                key: legacy_main.clone(),
+                ..ComponentDescriptor::default()
+            });
+        }
+        if !saved
+            .components
+            .iter()
+            .any(|component| component.id == "main")
+        {
+            let mut component_routes = Vec::new();
+            for route in saved
+                .routes
+                .iter()
+                .chain(std::iter::once(&saved.descriptor.key))
+            {
+                let component_route = ComponentRoute {
+                    device: route.clone(),
+                    component: legacy_main.clone(),
+                };
+                if !component_routes.contains(&component_route) {
+                    component_routes.push(component_route);
+                }
+            }
+            saved.components.push(SavedComponent {
+                id: "main".into(),
+                routes: component_routes,
+                ..SavedComponent::default()
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::battery::SavedBattery;
+
+    #[test]
+    fn v2_normalization_adds_implicit_main_without_changing_saved_history() {
+        let descriptor_route = DeviceKey {
+            backend: "windows.hid".into(),
+            local: "receiver/slot-1".into(),
+        };
+        let secondary_route = DeviceKey {
+            backend: "windows.hid".into(),
+            local: "receiver/slot-2".into(),
+        };
+        let mut config = Config {
+            devices: vec![SavedDevice {
+                id: "old-record-id".into(),
+                alias: "my headset".into(),
+                routes: vec![secondary_route.clone()],
+                descriptor: DeviceDescriptor {
+                    key: descriptor_route.clone(),
+                    identities: vec![Identity {
+                        namespace: "windows.usb-port".into(),
+                        kind: IdentityKind::Location,
+                        subject: "receiver".into(),
+                        value: "port-7".into(),
+                    }],
+                    ..DeviceDescriptor::default()
+                },
+                ..SavedDevice::default()
+            }],
+            batteries: vec![SavedBattery {
+                device_id: "old-record-id".into(),
+                component: "main".into(),
+                level: 63,
+                observed_at: 1234,
+            }],
+            ..Config::default()
+        };
+
+        normalize_v2(&mut config);
+
+        let saved = &config.devices[0];
+        assert_eq!(saved.id, "old-record-id");
+        assert_eq!(saved.alias, "my headset");
+        assert!(
+            saved
+                .descriptor
+                .components
+                .iter()
+                .any(|component| component.key == ComponentKey::legacy("main"))
+        );
+        let main = saved
+            .components
+            .iter()
+            .find(|component| component.id == "main")
+            .unwrap();
+        assert_eq!(main.routes.len(), 2);
+        assert!(main.routes.contains(&ComponentRoute {
+            device: descriptor_route,
+            component: ComponentKey::legacy("main"),
+        }));
+        assert!(main.routes.contains(&ComponentRoute {
+            device: secondary_route,
+            component: ComponentKey::legacy("main"),
+        }));
+        assert_eq!(config.batteries[0].component, "main");
+        assert_eq!(config.batteries[0].level, 63);
+        assert_eq!(config.batteries[0].observed_at, 1234);
     }
 }

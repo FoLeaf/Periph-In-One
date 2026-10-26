@@ -80,6 +80,7 @@ fn descriptor(
             backend: "windows.hid".into(),
             local: port_location(info),
         },
+        components: Vec::new(),
         name: name.unwrap_or_else(|| info.product_string().unwrap_or_default().into()),
         roles: if role.is_empty() {
             vec![]

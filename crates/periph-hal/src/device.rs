@@ -30,6 +30,68 @@ impl EndpointKey {
     }
 }
 
+/// Stable route to a component within one source/protocol. The key must come
+/// from protocol evidence that survives reordering and reconnection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComponentKey {
+    pub namespace: String,
+    pub value: String,
+}
+
+impl ComponentKey {
+    pub fn new(namespace: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn legacy(value: impl Into<String>) -> Self {
+        Self::new("legacy", value)
+    }
+}
+
+impl From<&str> for ComponentKey {
+    fn from(value: &str) -> Self {
+        Self::legacy(value)
+    }
+}
+
+impl From<String> for ComponentKey {
+    fn from(value: String) -> Self {
+        Self::legacy(value)
+    }
+}
+
+/// Cross-source identity evidence for a component. Claims must be unique and
+/// protocol-backed; names, role labels and list positions are not claims.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComponentClaim {
+    pub namespace: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComponentDescriptor {
+    pub key: ComponentKey,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub parent: Option<ComponentKey>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub roles: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub claims: Vec<ComponentClaim>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ComponentRoute {
+    pub device: DeviceKey,
+    pub component: ComponentKey,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Connection {
@@ -84,6 +146,9 @@ pub struct DeviceDescriptor {
     /// Empty on old serialized descriptors; callers use the route as fallback.
     #[cfg_attr(feature = "serde", serde(default))]
     pub endpoint: EndpointKey,
+    /// Protocol-described subcomponents such as left/right/charging case.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub components: Vec<ComponentDescriptor>,
     pub name: String,
     /// Extensible classification only; capabilities determine available APIs.
     pub roles: Vec<String>,
@@ -137,6 +202,15 @@ impl DeviceDescriptor {
             EndpointKey::for_device(&self.key)
         } else {
             self.endpoint.clone()
+        }
+    }
+
+    pub fn include_capability_component(&mut self, key: ComponentKey) {
+        if !self.components.iter().any(|component| component.key == key) {
+            self.components.push(ComponentDescriptor {
+                key,
+                ..ComponentDescriptor::default()
+            });
         }
     }
 }
