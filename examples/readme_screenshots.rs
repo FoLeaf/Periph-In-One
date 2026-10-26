@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_editing_alias("办公鼠标".into());
     ui.set_editing_has_name(true);
     ui.set_update_available(true);
-    ui.set_update_version("0.23.0".into());
+    ui.set_update_version("0.24.0".into());
     ui.set_update_ready(true);
     ui.set_update_status("更新已就绪".into());
     ui.set_update_notes(ModelRc::new(VecModel::from(vec![
