@@ -1,5 +1,8 @@
 mod support;
-use periph_hal::{BackendFailure, Connection, ErrorKind, HardwareError, IdentityKind};
+use periph_hal::{
+    BackendFailure, Connection, CoverageScope, EndpointKey, ErrorKind, FailureScope, HardwareError,
+    IdentityKind, OperationKind, ScopedFailure, Snapshot,
+};
 use periph_in_one::model::{self, SavedDevice};
 use support::{device, snapshot};
 
@@ -201,6 +204,106 @@ fn only_complete_coverage_can_mark_an_absent_device_offline() {
     let offline = model::merge_snapshot(&first, &snapshot(vec![], &["one"])).devices;
     assert!(!offline[0].present);
     assert_eq!(offline[0].connection, Connection::Disconnected);
+}
+
+#[test]
+fn failed_receiver_endpoint_withholds_its_slots_but_other_endpoints_go_offline() {
+    let endpoint = EndpointKey {
+        backend: "windows.hid".into(),
+        local: "receiver-container-a".into(),
+    };
+    let other_endpoint = EndpointKey {
+        backend: "windows.hid".into(),
+        local: "receiver-container-b".into(),
+    };
+    let slot = |endpoint: &EndpointKey, local: &str, target: &str| {
+        let mut device = device("windows.hid", local, "", "");
+        device.descriptor.endpoint = endpoint.clone();
+        device.descriptor.target = target.into();
+        device
+    };
+    let first = model::merge_snapshot(
+        &[],
+        &snapshot(
+            vec![
+                slot(&endpoint, "port-a#1", "slot:1"),
+                slot(&endpoint, "port-a#2", "slot:2"),
+                slot(&other_endpoint, "port-b#1", "slot:1"),
+            ],
+            &["windows.hid"],
+        ),
+    )
+    .devices;
+
+    let partial = Snapshot {
+        completed: vec!["windows.hid".into()],
+        coverage: vec![CoverageScope::Backend {
+            backend: "windows.hid".into(),
+        }],
+        scoped_failures: vec![ScopedFailure {
+            scope: FailureScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            operation: OperationKind::Discovery,
+            error: HardwareError::new(ErrorKind::Timeout, "receiver stopped responding"),
+        }],
+        ..Snapshot::default()
+    };
+    let second = model::merge_snapshot(&first, &partial);
+    for local in ["port-a#1", "port-a#2"] {
+        let old = second
+            .devices
+            .iter()
+            .find(|record| record.saved.routes.iter().any(|route| route.local == local))
+            .unwrap();
+        assert!(old.present);
+        assert_eq!(old.connection, Connection::Unknown);
+        assert_eq!(old.issue.as_ref().unwrap().kind, ErrorKind::Timeout);
+    }
+    let other = second
+        .devices
+        .iter()
+        .find(|record| {
+            record
+                .saved
+                .routes
+                .iter()
+                .any(|route| route.local == "port-b#1")
+        })
+        .unwrap();
+    assert!(!other.present);
+    assert_eq!(other.connection, Connection::Disconnected);
+}
+
+#[test]
+fn capability_failure_does_not_replace_confirmed_connection_or_withhold_device_coverage() {
+    let current = device("one", "a", "unit", "");
+    let previous = model::merge_snapshot(&[], &snapshot(vec![current.clone()], &["one"])).devices;
+    let report = Snapshot {
+        devices: vec![current],
+        completed: vec!["one".into()],
+        coverage: vec![CoverageScope::Backend {
+            backend: "one".into(),
+        }],
+        scoped_failures: vec![ScopedFailure {
+            scope: FailureScope::Capability {
+                device: periph_hal::DeviceKey {
+                    backend: "one".into(),
+                    local: "a".into(),
+                },
+                component: "main".into(),
+                id: "power.battery".into(),
+                version: 2,
+            },
+            operation: OperationKind::Capability,
+            error: HardwareError::new(ErrorKind::Timeout, "battery read timed out"),
+        }],
+        ..Snapshot::default()
+    };
+    let result = model::merge_snapshot(&previous, &report);
+    assert!(result.devices[0].present);
+    assert_eq!(result.devices[0].connection, Connection::Connected);
+    assert!(result.devices[0].issue.is_none());
 }
 
 #[test]

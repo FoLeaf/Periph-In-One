@@ -50,6 +50,7 @@ pub fn snapshot(devices: Vec<Device>, completed: &[&str]) -> Snapshot {
         devices,
         completed: completed.iter().map(|source| (*source).into()).collect(),
         failures: vec![],
+        ..Snapshot::default()
     }
 }
 

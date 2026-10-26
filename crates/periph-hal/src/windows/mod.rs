@@ -8,7 +8,7 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
-use crate::{Backend, Device, DeviceDescriptor, HardwareError};
+use crate::{Backend, Device, DeviceDescriptor, DiscoveryReport, HardwareError};
 
 pub struct HidBackend;
 impl Backend for HidBackend {
@@ -20,6 +20,9 @@ impl Backend for HidBackend {
     }
     fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
         hid::discover()
+    }
+    fn discovery_report(&mut self) -> Result<DiscoveryReport, HardwareError> {
+        hid::discovery_report()
     }
 }
 

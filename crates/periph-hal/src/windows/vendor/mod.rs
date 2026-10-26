@@ -22,6 +22,12 @@ pub struct Outcome {
     pub issue: Option<HardwareError>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetCardinality {
+    Single,
+    Multiple,
+}
+
 impl Outcome {
     pub fn failure(error: HardwareError) -> Self {
         Self {
@@ -34,6 +40,10 @@ impl Outcome {
 pub trait VendorAdapter {
     fn matches(&self, info: &DeviceInfo) -> bool;
     fn kind(&self) -> &'static str;
+    /// Protocol topology, independent of names or discovery order.
+    fn target_cardinality(&self, _info: &DeviceInfo) -> TargetCardinality {
+        TargetCardinality::Single
+    }
     /// Identify topology/identity only. Battery queries belong to read_target.
     fn discover(&self, _api: &HidApi, _info: &DeviceInfo) -> Vec<Outcome> {
         vec![Outcome::default()]

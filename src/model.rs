@@ -1,6 +1,7 @@
 //! Device records and identity reconciliation. No battery state or platform rules.
 use periph_hal::{
-    Connection, DeviceDescriptor, DeviceKey, HardwareError, Identity, IdentityKind, Snapshot,
+    Connection, CoverageScope, DeviceDescriptor, DeviceKey, EndpointKey, FailureScope,
+    HardwareError, Identity, IdentityKind, ScopedFailure, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -12,8 +13,18 @@ pub struct SavedDevice {
     pub id: String,
     pub descriptor: DeviceDescriptor,
     pub routes: Vec<DeviceKey>,
+    /// Access endpoint for each route; old config files infer the primary route
+    /// from its descriptor and leave joined legacy routes unknown.
+    pub endpoint_routes: Vec<EndpointRoute>,
     pub alias: String,
     pub identity_conflict: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EndpointRoute {
+    pub route: DeviceKey,
+    pub endpoint: EndpointKey,
 }
 
 #[derive(Clone, Debug)]
@@ -130,15 +141,104 @@ fn routes(saved: &SavedDevice) -> impl Iterator<Item = &DeviceKey> {
         .chain(std::iter::once(&saved.descriptor.key))
 }
 
+fn endpoint_for_descriptor(descriptor: &DeviceDescriptor) -> EndpointKey {
+    if !descriptor.endpoint.is_empty() {
+        return descriptor.endpoint.clone();
+    }
+    EndpointKey::for_device(&descriptor.key)
+}
+
+fn endpoint_for_route(saved: &SavedDevice, route: &DeviceKey) -> EndpointKey {
+    saved
+        .endpoint_routes
+        .iter()
+        .find(|mapping| &mapping.route == route)
+        .map(|mapping| mapping.endpoint.clone())
+        .unwrap_or_else(|| {
+            if route == &saved.descriptor.key {
+                endpoint_for_descriptor(&saved.descriptor)
+            } else {
+                EndpointKey::for_device(route)
+            }
+        })
+}
+
+fn scope_covers_route(scope: &CoverageScope, route: &DeviceKey, endpoint: &EndpointKey) -> bool {
+    match scope {
+        CoverageScope::Backend { backend } => backend == &route.backend,
+        CoverageScope::Endpoint { endpoint: covered } => endpoint == covered,
+        CoverageScope::Device { device } => device == route,
+        CoverageScope::Component { .. } => false,
+    }
+}
+
+fn failure_withholds_route(
+    failure: &ScopedFailure,
+    route: &DeviceKey,
+    endpoint: &EndpointKey,
+) -> bool {
+    match &failure.scope {
+        FailureScope::Backend { backend } => backend == &route.backend,
+        FailureScope::Endpoint { endpoint: failed } => endpoint == failed,
+        FailureScope::Device { device } => device == route,
+        FailureScope::Component { .. } | FailureScope::Capability { .. } => false,
+    }
+}
+
+fn route_covered(snapshot: &Snapshot, saved: &SavedDevice, route: &DeviceKey) -> bool {
+    let endpoint = endpoint_for_route(saved, route);
+    let covered = snapshot
+        .coverage
+        .iter()
+        .any(|scope| scope_covers_route(scope, route, &endpoint))
+        || (snapshot.coverage.is_empty()
+            && snapshot
+                .completed
+                .iter()
+                .any(|backend| backend == &route.backend));
+    covered
+        && !snapshot
+            .scoped_failures
+            .iter()
+            .any(|failure| failure_withholds_route(failure, route, &endpoint))
+        && !snapshot
+            .failures
+            .iter()
+            .any(|failure| failure.backend == route.backend)
+}
+
+fn failure_for_saved_route<'a>(
+    snapshot: &'a Snapshot,
+    saved: &SavedDevice,
+) -> Option<&'a HardwareError> {
+    for route in routes(saved) {
+        let endpoint = endpoint_for_route(saved, route);
+        if let Some(failure) = snapshot
+            .scoped_failures
+            .iter()
+            .find(|failure| failure_withholds_route(failure, route, &endpoint))
+        {
+            return Some(&failure.error);
+        }
+        if let Some(failure) = snapshot
+            .failures
+            .iter()
+            .find(|failure| failure.backend == route.backend)
+        {
+            return Some(&failure.error);
+        }
+    }
+    None
+}
+
 /// Reconcile facts from completed sources only. A missing/failed source leaves
 /// its known devices unknown; it cannot authoritatively declare them offline.
 pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
-    let completed: HashSet<_> = snapshot.completed.iter().map(String::as_str).collect();
     let mut devices: Vec<_> = previous
         .iter()
         .map(|old| {
             let covered =
-                routes(&old.saved).all(|route| completed.contains(route.backend.as_str()));
+                routes(&old.saved).all(|route| route_covered(snapshot, &old.saved, route));
             Device {
                 saved: old.saved.clone(),
                 present: if covered { false } else { old.present },
@@ -147,13 +247,7 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 } else {
                     Connection::Unknown
                 },
-                issue: snapshot
-                    .failures
-                    .iter()
-                    .find(|failure| {
-                        routes(&old.saved).any(|route| route.backend == failure.backend)
-                    })
-                    .map(|failure| failure.error.clone()),
+                issue: failure_for_saved_route(snapshot, &old.saved).cloned(),
             }
         })
         .collect();
@@ -289,6 +383,17 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 ));
                 let old_routes = devices[other].saved.routes.clone();
                 devices[index].saved.routes.extend(old_routes);
+                let old_endpoint_routes = devices[other].saved.endpoint_routes.clone();
+                for mapping in old_endpoint_routes {
+                    if !devices[index]
+                        .saved
+                        .endpoint_routes
+                        .iter()
+                        .any(|existing| existing.route == mapping.route)
+                    {
+                        devices[index].saved.endpoint_routes.push(mapping);
+                    }
+                }
                 remove.push(other);
             }
             let removed_before = remove.iter().filter(|&&other| other < index).count();
@@ -301,13 +406,36 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         let device = &mut devices[index];
         let already_seen = bindings.values().any(|id| id == &device.saved.id);
         if !already_seen {
-            device
+            let retained_routes: Vec<_> = device
                 .saved
                 .routes
-                .retain(|route| !completed.contains(route.backend.as_str()));
+                .iter()
+                .filter(|route| !route_covered(snapshot, &device.saved, route))
+                .cloned()
+                .collect();
+            let retained_set: HashSet<_> = retained_routes.iter().cloned().collect();
+            device.saved.routes = retained_routes;
+            device
+                .saved
+                .endpoint_routes
+                .retain(|mapping| retained_set.contains(&mapping.route));
         }
         if !device.saved.routes.contains(&descriptor.key) {
             device.saved.routes.push(descriptor.key.clone());
+        }
+        let endpoint = endpoint_for_descriptor(descriptor);
+        if let Some(mapping) = device
+            .saved
+            .endpoint_routes
+            .iter_mut()
+            .find(|mapping| mapping.route == descriptor.key)
+        {
+            mapping.endpoint = endpoint;
+        } else {
+            device.saved.endpoint_routes.push(EndpointRoute {
+                route: descriptor.key.clone(),
+                endpoint,
+            });
         }
         let mut updated = descriptor.clone();
         if already_seen {

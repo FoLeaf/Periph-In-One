@@ -8,6 +8,28 @@ pub struct DeviceKey {
     pub local: String,
 }
 
+/// A local access endpoint groups one or more logical devices reached through
+/// the same physical or protocol endpoint. It is a route scope, not identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EndpointKey {
+    pub backend: String,
+    pub local: String,
+}
+
+impl EndpointKey {
+    pub fn for_device(key: &DeviceKey) -> Self {
+        Self {
+            backend: key.backend.clone(),
+            local: key.local.clone(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.backend.is_empty() || self.local.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Connection {
@@ -58,6 +80,10 @@ pub struct Link {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceDescriptor {
     pub key: DeviceKey,
+    /// Endpoint shared by logical devices, such as slots behind one receiver.
+    /// Empty on old serialized descriptors; callers use the route as fallback.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub endpoint: EndpointKey,
     pub name: String,
     /// Extensible classification only; capabilities determine available APIs.
     pub roles: Vec<String>,
@@ -101,6 +127,16 @@ impl DeviceFacts {
                     && old.subject == identity.subject)
             });
             device.descriptor.identities.push(identity.clone());
+        }
+    }
+}
+
+impl DeviceDescriptor {
+    pub fn access_endpoint(&self) -> EndpointKey {
+        if self.endpoint.is_empty() {
+            EndpointKey::for_device(&self.key)
+        } else {
+            self.endpoint.clone()
         }
     }
 }

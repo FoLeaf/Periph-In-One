@@ -19,7 +19,7 @@
 use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
     protocol,
-    vendor::{Outcome, VendorAdapter},
+    vendor::{Outcome, TargetCardinality, VendorAdapter},
     windows::{
         topology::container_id,
         transport::{drain, open_pair, send},
@@ -54,6 +54,14 @@ impl Receiver {
     }
 }
 
+fn target_cardinality(pid: u16) -> TargetCardinality {
+    match Receiver::from_pid(pid) {
+        Some(Receiver::Lightspeed) => TargetCardinality::Single,
+        Some(Receiver::Unifying | Receiver::Bolt) => TargetCardinality::Multiple,
+        None => TargetCardinality::Single,
+    }
+}
+
 impl VendorAdapter for LogitechReceiver {
     fn matches(&self, info: &DeviceInfo) -> bool {
         // The two FF00 collections carry the two report widths — registers
@@ -70,6 +78,10 @@ impl VendorAdapter for LogitechReceiver {
         // registers that would are out of scope, see the module notes), so
         // the product line default stands.
         "mouse"
+    }
+
+    fn target_cardinality(&self, info: &DeviceInfo) -> TargetCardinality {
+        target_cardinality(info.product_id())
     }
 
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
@@ -386,4 +398,17 @@ fn hidpp_name(
     }
     let name = String::from_utf8_lossy(raw).trim().to_string();
     (name.len() >= 4).then_some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TargetCardinality, target_cardinality};
+
+    #[test]
+    fn receiver_topology_comes_from_protocol_family() {
+        assert_eq!(target_cardinality(0xc539), TargetCardinality::Single);
+        for pid in [0xc52b, 0xc532, 0xc548] {
+            assert_eq!(target_cardinality(pid), TargetCardinality::Multiple);
+        }
+    }
 }

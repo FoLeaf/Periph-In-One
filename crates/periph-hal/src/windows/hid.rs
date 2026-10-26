@@ -1,10 +1,11 @@
 //! HID discovery and driver dispatch. Native topology and I/O are separate.
 use super::topology::{container_id, port_location, raw_serial_number};
+use crate::windows::vendor::{self, TargetCardinality};
 use crate::{
-    Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind,
-    HardwareError, HardwareIdentifier, Identity, IdentityKind, Link,
+    Capabilities, Connection, CoverageScope, Device, DeviceDescriptor, DeviceFacts, DeviceKey,
+    DiscoveryReport, EndpointKey, ErrorKind, FailureScope, HardwareError, HardwareIdentifier,
+    Identity, IdentityKind, Link, OperationKind, ScopedFailure,
     battery::{Battery, BatteryReading, BatteryState, Percent, Sample, SampleOrigin},
-    vendor,
 };
 use hidapi::{DeviceInfo, HidApi};
 use std::{
@@ -75,6 +76,10 @@ fn descriptor(
             backend: "windows.hid".into(),
             local: route,
         },
+        endpoint: EndpointKey {
+            backend: "windows.hid".into(),
+            local: port_location(info),
+        },
         name: name.unwrap_or_else(|| info.product_string().unwrap_or_default().into()),
         roles: if role.is_empty() {
             vec![]
@@ -99,19 +104,84 @@ fn descriptor(
     }
 }
 
+fn failure_target(
+    cardinality: TargetCardinality,
+    slot: Option<u8>,
+    endpoint: EndpointKey,
+    device: DeviceKey,
+) -> (FailureScope, Option<String>) {
+    match slot {
+        Some(slot) => (
+            FailureScope::Device { device },
+            Some(format!("slot:{slot}")),
+        ),
+        None if cardinality == TargetCardinality::Single => {
+            (FailureScope::Device { device }, Some(String::new()))
+        }
+        None => (FailureScope::Endpoint { endpoint }, None),
+    }
+}
+
 pub fn discover() -> Result<Vec<Device>, HardwareError> {
+    Ok(discovery_report()?.devices)
+}
+
+pub fn discovery_report() -> Result<DiscoveryReport, HardwareError> {
     let api = HidApi::new().map_err(HardwareError::transport)?;
-    let mut result = Vec::new();
+    let mut report = DiscoveryReport {
+        coverage: vec![CoverageScope::Backend {
+            backend: "windows.hid".into(),
+        }],
+        ..DiscoveryReport::default()
+    };
     for interfaces in receiver_interfaces(&api).values() {
         let info = interfaces[0];
         let Some(adapter) = vendor::ADAPTERS.iter().find(|a| a.matches(info)) else {
             continue;
         };
+        let endpoint = EndpointKey {
+            backend: "windows.hid".into(),
+            local: port_location(info),
+        };
+        let cardinality = adapter.target_cardinality(info);
+        let mut endpoint_withheld = false;
         let lock = Arc::new(Mutex::new(()));
         for outcome in adapter.discover(&api, info) {
             let mut route = port_location(info);
             if let Some(slot) = outcome.slot {
                 route.push_str(&format!("#{slot}"));
+            }
+            if let Some(error) = outcome.issue.clone() {
+                let device_key = DeviceKey {
+                    backend: "windows.hid".into(),
+                    local: route.clone(),
+                };
+                let (scope, target) =
+                    failure_target(cardinality, outcome.slot, endpoint.clone(), device_key);
+                if let Some(target) = target {
+                    let mut description = descriptor(
+                        info,
+                        route,
+                        adapter.kind(),
+                        outcome.hardware_name,
+                        outcome.uid,
+                    );
+                    description.target = target;
+                    report.devices.push(Device {
+                        descriptor: description,
+                        connection: Connection::Unknown,
+                        capabilities: Capabilities::default(),
+                        issue: Some(error.clone()),
+                    });
+                } else {
+                    endpoint_withheld = true;
+                }
+                report.failures.push(ScopedFailure {
+                    scope,
+                    operation: OperationKind::Discovery,
+                    error,
+                });
+                continue;
             }
             let mut capabilities = Capabilities::default();
             let mut description = descriptor(
@@ -219,13 +289,70 @@ pub fn discover() -> Result<Vec<Device>, HardwareError> {
                     })
                 }),
             )?;
-            result.push(Device {
+            report.devices.push(Device {
                 descriptor: description,
                 connection: outcome.connection,
                 capabilities,
                 issue: outcome.issue,
             });
         }
+        if !endpoint_withheld {
+            report.coverage.push(CoverageScope::Endpoint { endpoint });
+        }
     }
-    Ok(result)
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys() -> (EndpointKey, DeviceKey) {
+        (
+            EndpointKey {
+                backend: "windows.hid".into(),
+                local: "container-a".into(),
+            },
+            DeviceKey {
+                backend: "windows.hid".into(),
+                local: "port-a".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn failed_single_target_remains_a_device_but_unknown_multi_target_withholds_endpoint() {
+        let (endpoint, device) = keys();
+        let (single_scope, single_target) = failure_target(
+            TargetCardinality::Single,
+            None,
+            endpoint.clone(),
+            device.clone(),
+        );
+        assert_eq!(
+            single_scope,
+            FailureScope::Device {
+                device: device.clone()
+            }
+        );
+        assert_eq!(single_target.as_deref(), Some(""));
+
+        let (multi_scope, multi_target) = failure_target(
+            TargetCardinality::Multiple,
+            None,
+            endpoint.clone(),
+            device.clone(),
+        );
+        assert_eq!(multi_scope, FailureScope::Endpoint { endpoint });
+        assert!(multi_target.is_none());
+
+        let (known_slot_scope, known_slot_target) = failure_target(
+            TargetCardinality::Multiple,
+            Some(3),
+            keys().0,
+            device.clone(),
+        );
+        assert_eq!(known_slot_scope, FailureScope::Device { device });
+        assert_eq!(known_slot_target.as_deref(), Some("slot:3"));
+    }
 }

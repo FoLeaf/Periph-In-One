@@ -7,8 +7,8 @@
 //! devices are listed.
 
 use crate::{
-    Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind,
-    HardwareError, HardwareIdentifier, Identity, IdentityKind, Link,
+    Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, EndpointKey,
+    ErrorKind, HardwareError, HardwareIdentifier, Identity, IdentityKind, Link,
     battery::{Battery, BatteryReading, BatteryState, Percent, Sample, SampleOrigin},
     windows::wide,
 };
@@ -258,6 +258,10 @@ fn collect(
             Ok((
                 DeviceDescriptor {
                     key: DeviceKey {
+                        backend: "windows.bluetooth.audio".into(),
+                        local: format!("bt:{}", device.address),
+                    },
+                    endpoint: EndpointKey {
                         backend: "windows.bluetooth.audio".into(),
                         local: format!("bt:{}", device.address),
                     },

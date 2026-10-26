@@ -340,7 +340,10 @@ fn discovery_stream_reports_fast_backend_before_blocked_peer() {
         match stream.poll() {
             periph_hal::DiscoveryPoll::Update(update) if update.backend == "test.fast" => {
                 fast_name = update.result.ok().and_then(|devices| {
-                    devices.first().map(|device| device.descriptor.name.clone())
+                    devices
+                        .devices
+                        .first()
+                        .map(|device| device.descriptor.name.clone())
                 });
             }
             periph_hal::DiscoveryPoll::Pending => thread::sleep(Duration::from_millis(2)),

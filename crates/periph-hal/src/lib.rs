@@ -14,13 +14,14 @@ pub use capability::{
     BackendExecutor, BackendOperation, Capabilities, Capability, CapabilityDescriptor,
 };
 pub use device::{
-    Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, HardwareIdentifier, Identity,
-    IdentityKind, Link,
+    Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, EndpointKey, HardwareIdentifier,
+    Identity, IdentityKind, Link,
 };
 pub use error::{ErrorKind, HardwareError};
 pub use hardware::{
-    Backend, BackendDiscoveryUpdate, BackendFailure, DiscoveryPoll, DiscoveryStream, Hardware,
-    Inventory, Snapshot,
+    Backend, BackendDiscoveryUpdate, BackendFailure, CoverageScope, DiscoveryPoll, DiscoveryReport,
+    DiscoveryStream, FailureScope, Hardware, Inventory, InventoryReport, OperationKind,
+    ScopedFailure, Snapshot,
 };
 
 /// Default deadline for one backend or capability operation batch.

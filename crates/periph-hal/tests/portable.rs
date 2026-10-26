@@ -1,6 +1,7 @@
 use periph_hal::{
-    Backend, Capabilities, Capability, Connection, Device, DeviceDescriptor, DeviceKey, ErrorKind,
-    Hardware, HardwareError,
+    Backend, Capabilities, Capability, Connection, CoverageScope, Device, DeviceDescriptor,
+    DeviceKey, DiscoveryReport, EndpointKey, ErrorKind, FailureScope, Hardware, HardwareError,
+    OperationKind, ScopedFailure,
     battery::{Battery, BatteryState, Percent},
 };
 
@@ -19,6 +20,7 @@ fn descriptor() -> DeviceDescriptor {
             backend: "fake.camera".into(),
             local: "camera-1".into(),
         },
+        endpoint: Default::default(),
         name: "Camera".into(),
         roles: vec!["video.capture".into()],
         identifiers: vec![],
@@ -91,6 +93,14 @@ fn failed_backend_does_not_hide_success_or_claim_complete_inventory() {
     assert_eq!(snapshot.devices.len(), 1);
     assert_eq!(snapshot.completed, ["fake.camera"]);
     assert_eq!(snapshot.failures[0].backend, "fake.broken");
+    assert!(matches!(
+        snapshot.scoped_failures[0].scope,
+        FailureScope::Backend { ref backend } if backend == "fake.broken"
+    ));
+    assert_eq!(
+        snapshot.scoped_failures[0].operation,
+        OperationKind::Discovery
+    );
     let inventory = hardware.inventory();
     assert_eq!(inventory.devices.len(), 1);
     assert_eq!(
@@ -98,6 +108,58 @@ fn failed_backend_does_not_hide_success_or_claim_complete_inventory() {
         ErrorKind::PermissionDenied
     );
     assert_eq!(inventory.completed, ["fake.camera"]);
+}
+
+struct PartialReceiver;
+
+impl Backend for PartialReceiver {
+    fn id(&self) -> &str {
+        "fake.receiver"
+    }
+    fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError> {
+        Ok(vec![])
+    }
+    fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
+        Ok(vec![])
+    }
+    fn discovery_report(&mut self) -> Result<DiscoveryReport, HardwareError> {
+        let endpoint = EndpointKey {
+            backend: self.id().into(),
+            local: "receiver-a".into(),
+        };
+        Ok(DiscoveryReport {
+            coverage: vec![CoverageScope::Backend {
+                backend: self.id().into(),
+            }],
+            failures: vec![ScopedFailure {
+                scope: FailureScope::Endpoint { endpoint },
+                operation: OperationKind::Discovery,
+                error: HardwareError::new(ErrorKind::Timeout, "receiver read timed out"),
+            }],
+            ..DiscoveryReport::default()
+        })
+    }
+}
+
+#[test]
+fn partial_backend_report_keeps_backend_coverage_and_endpoint_failure_distinct() {
+    let mut hardware = Hardware::new();
+    hardware.register(PartialReceiver).unwrap();
+    let snapshot = hardware.discover();
+    assert_eq!(snapshot.completed, ["fake.receiver"]);
+    assert!(snapshot.failures.is_empty());
+    assert!(matches!(
+        snapshot.coverage.as_slice(),
+        [CoverageScope::Backend { backend }] if backend == "fake.receiver"
+    ));
+    assert!(matches!(
+        snapshot.scoped_failures.as_slice(),
+        [ScopedFailure {
+            scope: FailureScope::Endpoint { endpoint },
+            operation: OperationKind::Discovery,
+            ..
+        }] if endpoint.local == "receiver-a"
+    ));
 }
 
 #[test]

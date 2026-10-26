@@ -1,6 +1,6 @@
 use crate::{
     BackendExecutor, BackendOperation, Capabilities, DEFAULT_OPERATION_TIMEOUT, Device,
-    DeviceDescriptor, ErrorKind, HardwareError,
+    DeviceDescriptor, DeviceKey, EndpointKey, ErrorKind, HardwareError,
 };
 use std::{
     any::Any,
@@ -22,8 +22,29 @@ const MAX_PENDING_OPERATIONS: usize = 128;
 pub trait Backend: Any {
     fn id(&self) -> &str;
     fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError>;
+    /// Report authoritative inventory coverage. Existing backends retain the
+    /// original contract and cover their full backend on success.
+    fn inventory_report(&mut self) -> Result<InventoryReport, HardwareError> {
+        let backend = self.id().to_owned();
+        Ok(InventoryReport {
+            devices: self.inventory()?,
+            coverage: vec![CoverageScope::Backend { backend }],
+            failures: Vec::new(),
+        })
+    }
     /// Return device facts and clients without sampling their capabilities.
     fn discover(&mut self) -> Result<Vec<Device>, HardwareError>;
+    /// Report authoritative discovery coverage. Backends with partial endpoint
+    /// results can override this while keeping `discover` as a compatibility
+    /// entry point.
+    fn discovery_report(&mut self) -> Result<DiscoveryReport, HardwareError> {
+        let backend = self.id().to_owned();
+        Ok(DiscoveryReport {
+            devices: self.discover()?,
+            coverage: vec![CoverageScope::Backend { backend }],
+            failures: Vec::new(),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -32,12 +53,83 @@ pub struct BackendFailure {
     pub error: HardwareError,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CoverageScope {
+    /// The backend completed its source scan. More specific failures withhold
+    /// only their matching endpoint, device, or component from that coverage.
+    Backend { backend: String },
+    /// This endpoint produced authoritative results for the covered operation.
+    Endpoint { endpoint: EndpointKey },
+    /// This exact logical route was authoritatively checked.
+    Device { device: DeviceKey },
+    /// This component was authoritatively checked independently of the device.
+    Component {
+        device: DeviceKey,
+        component: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailureScope {
+    Backend {
+        backend: String,
+    },
+    Endpoint {
+        endpoint: EndpointKey,
+    },
+    Device {
+        device: DeviceKey,
+    },
+    Component {
+        device: DeviceKey,
+        component: String,
+    },
+    Capability {
+        device: DeviceKey,
+        component: String,
+        id: String,
+        version: u16,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationKind {
+    Inventory,
+    Discovery,
+    Capability,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScopedFailure {
+    /// A failed scope withholds matching coverage; capability failures never
+    /// invalidate device presence or connection evidence.
+    pub scope: FailureScope,
+    pub operation: OperationKind,
+    pub error: HardwareError,
+}
+
+#[derive(Default, Debug)]
+pub struct InventoryReport {
+    pub devices: Vec<DeviceDescriptor>,
+    pub coverage: Vec<CoverageScope>,
+    pub failures: Vec<ScopedFailure>,
+}
+
+#[derive(Default, Debug)]
+pub struct DiscoveryReport {
+    pub devices: Vec<Device>,
+    pub coverage: Vec<CoverageScope>,
+    pub failures: Vec<ScopedFailure>,
+}
+
 #[derive(Default, Debug)]
 pub struct Inventory {
     pub devices: Vec<DeviceDescriptor>,
     /// Only these sources completed an authoritative inventory this round.
     pub completed: Vec<String>,
     pub failures: Vec<BackendFailure>,
+    pub coverage: Vec<CoverageScope>,
+    pub scoped_failures: Vec<ScopedFailure>,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -45,11 +137,37 @@ pub struct Snapshot {
     pub devices: Vec<Device>,
     pub completed: Vec<String>,
     pub failures: Vec<BackendFailure>,
+    pub coverage: Vec<CoverageScope>,
+    pub scoped_failures: Vec<ScopedFailure>,
 }
 
 pub struct BackendDiscoveryUpdate {
     pub backend: String,
-    pub result: Result<Vec<Device>, HardwareError>,
+    pub result: Result<DiscoveryReport, HardwareError>,
+}
+
+fn has_backend_coverage(coverage: &[CoverageScope], backend: &str) -> bool {
+    coverage.iter().any(
+        |scope| matches!(scope, CoverageScope::Backend { backend: covered } if covered == backend),
+    )
+}
+
+fn push_backend_failure(
+    failures: &mut Vec<BackendFailure>,
+    scoped_failures: &mut Vec<ScopedFailure>,
+    backend: String,
+    operation: OperationKind,
+    error: HardwareError,
+) {
+    failures.push(BackendFailure {
+        backend: backend.clone(),
+        error: error.clone(),
+    });
+    scoped_failures.push(ScopedFailure {
+        scope: FailureScope::Backend { backend },
+        operation,
+        error,
+    });
 }
 
 pub enum DiscoveryPoll {
@@ -88,15 +206,16 @@ impl DiscoveryStream<'_> {
                 Ok(reply) => {
                     let (backend, _) = self.pending.remove(index);
                     let result = match reply {
-                        Reply::Discover(Ok(devices)) => {
+                        Reply::Discover(Ok(report)) => {
                             self.hardware.live.insert(
                                 backend.clone(),
-                                devices
+                                report
+                                    .devices
                                     .iter()
                                     .map(|device| device.capabilities.clone())
                                     .collect(),
                             );
-                            Ok(devices)
+                            Ok(report)
                         }
                         Reply::Discover(Err(error)) | Reply::Inventory(Err(error)) => Err(error),
                         _ => Err(HardwareError::new(
@@ -149,8 +268,8 @@ enum QueryKind {
 }
 
 enum Reply {
-    Inventory(Result<Vec<DeviceDescriptor>, HardwareError>),
-    Discover(Result<Vec<Device>, HardwareError>),
+    Inventory(Result<InventoryReport, HardwareError>),
+    Discover(Result<DiscoveryReport, HardwareError>),
 }
 
 enum Task {
@@ -341,38 +460,36 @@ impl BackendWorker {
                                 Err(error.clone())
                             } else if let Some(backend) = backend.as_mut() {
                                 match kind {
-                                    QueryKind::Inventory => {
-                                        catch_unwind(AssertUnwindSafe(|| backend.inventory()))
-                                            .unwrap_or_else(|_| {
-                                                Err(HardwareError::new(
-                                                    ErrorKind::Unavailable,
-                                                    "backend inventory panicked",
-                                                ))
-                                            })
-                                            .map(|devices| Reply::Inventory(Ok(devices)))
-                                    }
-                                    QueryKind::Discover => {
-                                        catch_unwind(AssertUnwindSafe(|| backend.discover()))
-                                            .unwrap_or_else(|_| {
-                                                Err(HardwareError::new(
-                                                    ErrorKind::Unavailable,
-                                                    "backend discovery panicked",
-                                                ))
-                                            })
-                                            .map(|mut devices| {
-                                                let executor: Arc<dyn BackendExecutor> =
-                                                    Arc::new(WorkerExecutor {
-                                                        shared: Arc::downgrade(&thread_shared),
-                                                        generation,
-                                                    });
-                                                for device in &mut devices {
-                                                    device
-                                                        .capabilities
-                                                        .bind_executor(executor.clone());
-                                                }
-                                                Reply::Discover(Ok(devices))
-                                            })
-                                    }
+                                    QueryKind::Inventory => catch_unwind(AssertUnwindSafe(|| {
+                                        backend.inventory_report()
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        Err(HardwareError::new(
+                                            ErrorKind::Unavailable,
+                                            "backend inventory panicked",
+                                        ))
+                                    })
+                                    .map(|report| Reply::Inventory(Ok(report))),
+                                    QueryKind::Discover => catch_unwind(AssertUnwindSafe(|| {
+                                        backend.discovery_report()
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        Err(HardwareError::new(
+                                            ErrorKind::Unavailable,
+                                            "backend discovery panicked",
+                                        ))
+                                    })
+                                    .map(|mut report| {
+                                        let executor: Arc<dyn BackendExecutor> =
+                                            Arc::new(WorkerExecutor {
+                                                shared: Arc::downgrade(&thread_shared),
+                                                generation,
+                                            });
+                                        for device in &mut report.devices {
+                                            device.capabilities.bind_executor(executor.clone());
+                                        }
+                                        Reply::Discover(Ok(report))
+                                    }),
                                 }
                             } else {
                                 Err(HardwareError::new(
@@ -386,8 +503,8 @@ impl BackendWorker {
                             let result = if is_current {
                                 result
                             } else {
-                                if let Ok(Reply::Discover(Ok(devices))) = &result {
-                                    for device in devices {
+                                if let Ok(Reply::Discover(Ok(report))) = &result {
+                                    for device in &report.devices {
                                         device.capabilities.invalidate();
                                     }
                                 }
@@ -443,8 +560,8 @@ impl BackendWorker {
 }
 
 fn invalidate_reply(reply: Reply) {
-    if let Reply::Discover(Ok(devices)) = reply {
-        for device in devices {
+    if let Reply::Discover(Ok(report)) = reply {
+        for device in report.devices {
             device.capabilities.invalidate();
         }
     }
@@ -562,20 +679,28 @@ impl Hardware {
                 )),
                 Runner::Inline(backend) => pending.push((
                     registration.id.clone(),
-                    Ok(ready_receiver(Reply::Inventory(backend.inventory()))),
+                    Ok(ready_receiver(Reply::Inventory(backend.inventory_report()))),
                 )),
             }
         }
         let mut result = Inventory::default();
         for (id, response) in pending {
             match receive_reply(response, deadline, None) {
-                Reply::Inventory(Ok(devices)) => {
-                    result.devices.extend(devices);
-                    result.completed.push(id);
+                Reply::Inventory(Ok(report)) => {
+                    result.devices.extend(report.devices);
+                    result.coverage.extend(report.coverage);
+                    result.scoped_failures.extend(report.failures);
+                    if has_backend_coverage(&result.coverage, &id) {
+                        result.completed.push(id);
+                    }
                 }
-                Reply::Inventory(Err(error)) | Reply::Discover(Err(error)) => {
-                    result.failures.push(BackendFailure { backend: id, error })
-                }
+                Reply::Inventory(Err(error)) | Reply::Discover(Err(error)) => push_backend_failure(
+                    &mut result.failures,
+                    &mut result.scoped_failures,
+                    id,
+                    OperationKind::Inventory,
+                    error,
+                ),
                 _ => result.failures.push(BackendFailure {
                     backend: id,
                     error: HardwareError::new(
@@ -633,7 +758,7 @@ impl Hardware {
                 }
                 Runner::Inline(backend) => pending.push((
                     registration.id.clone(),
-                    ready_receiver(Reply::Discover(backend.discover())),
+                    ready_receiver(Reply::Discover(backend.discovery_report())),
                 )),
             }
         }
@@ -652,14 +777,21 @@ fn collect_discovery(mut stream: DiscoveryStream<'_>) -> Snapshot {
     loop {
         match stream.poll() {
             DiscoveryPoll::Update(update) => match update.result {
-                Ok(devices) => {
-                    snapshot.devices.extend(devices);
-                    snapshot.completed.push(update.backend);
+                Ok(report) => {
+                    snapshot.devices.extend(report.devices);
+                    snapshot.coverage.extend(report.coverage);
+                    snapshot.scoped_failures.extend(report.failures);
+                    if has_backend_coverage(&snapshot.coverage, &update.backend) {
+                        snapshot.completed.push(update.backend);
+                    }
                 }
-                Err(error) => snapshot.failures.push(BackendFailure {
-                    backend: update.backend,
+                Err(error) => push_backend_failure(
+                    &mut snapshot.failures,
+                    &mut snapshot.scoped_failures,
+                    update.backend,
+                    OperationKind::Discovery,
                     error,
-                }),
+                ),
             },
             DiscoveryPoll::Pending => thread::sleep(Duration::from_millis(5)),
             DiscoveryPoll::Complete => return snapshot,

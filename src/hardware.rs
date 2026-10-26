@@ -4,8 +4,8 @@ use crate::{
     model::{self, Device},
 };
 use periph_hal::{
-    BackendDiscoveryUpdate, BackendFailure, Capability, DiscoveryPoll, DiscoveryStream, Hardware,
-    Snapshot,
+    BackendDiscoveryUpdate, Capability, CoverageScope, DiscoveryPoll, DiscoveryStream,
+    FailureScope, Hardware, OperationKind, ScopedFailure, Snapshot,
     battery::{Battery, BatteryReadRequest, BatteryState},
 };
 use std::{
@@ -18,6 +18,24 @@ use std::{
 pub struct ScanReport {
     pub snapshot: Snapshot,
     pub batteries: Vec<Observation>,
+}
+
+fn record_capability_failure(
+    snapshot: &mut Snapshot,
+    key: &periph_hal::DeviceKey,
+    component: &str,
+    error: &periph_hal::HardwareError,
+) {
+    snapshot.scoped_failures.push(ScopedFailure {
+        scope: FailureScope::Capability {
+            device: key.clone(),
+            component: component.into(),
+            id: Battery::ID.into(),
+            version: Battery::VERSION,
+        },
+        operation: OperationKind::Capability,
+        error: error.clone(),
+    });
 }
 
 struct PendingBattery {
@@ -86,6 +104,14 @@ impl<'a> RefreshSession<'a> {
             let pending = self.pending.remove(index);
             let state = match result {
                 Ok(reading) => {
+                    if let BatteryState::Unavailable(error) = &reading.state {
+                        record_capability_failure(
+                            &mut self.snapshot,
+                            &pending.key,
+                            &pending.component,
+                            error,
+                        );
+                    }
                     reading
                         .facts
                         .apply_to(&mut self.snapshot.devices[pending.device_index]);
@@ -93,6 +119,12 @@ impl<'a> RefreshSession<'a> {
                 }
                 Err(error) => {
                     self.snapshot.devices[pending.device_index].issue = Some(error.clone());
+                    record_capability_failure(
+                        &mut self.snapshot,
+                        &pending.key,
+                        &pending.component,
+                        &error,
+                    );
                     BatteryState::Unavailable(error)
                 }
             };
@@ -115,18 +147,33 @@ impl<'a> RefreshSession<'a> {
 
     fn accept_backend(&mut self, update: BackendDiscoveryUpdate) {
         match update.result {
-            Ok(devices) => {
+            Ok(report) => {
                 let first = self.snapshot.devices.len();
-                self.snapshot.devices.extend(devices);
-                self.snapshot.completed.push(update.backend);
+                self.snapshot.devices.extend(report.devices);
+                self.snapshot.coverage.extend(report.coverage);
+                self.snapshot.scoped_failures.extend(report.failures);
+                if self.snapshot.coverage.iter().any(|scope| {
+                    matches!(scope, CoverageScope::Backend { backend } if backend == &update.backend)
+                }) {
+                    self.snapshot.completed.push(update.backend.clone());
+                }
                 for device_index in first..self.snapshot.devices.len() {
                     self.queue_batteries(device_index);
                 }
             }
-            Err(error) => self.snapshot.failures.push(BackendFailure {
-                backend: update.backend,
-                error,
-            }),
+            Err(error) => {
+                self.snapshot.failures.push(periph_hal::BackendFailure {
+                    backend: update.backend.clone(),
+                    error: error.clone(),
+                });
+                self.snapshot.scoped_failures.push(ScopedFailure {
+                    scope: FailureScope::Backend {
+                        backend: update.backend,
+                    },
+                    operation: OperationKind::Discovery,
+                    error,
+                });
+            }
         }
     }
 
@@ -158,7 +205,7 @@ impl<'a> RefreshSession<'a> {
     }
 
     pub fn has_failures(&self) -> bool {
-        !self.snapshot.failures.is_empty()
+        !self.snapshot.failures.is_empty() || !self.snapshot.scoped_failures.is_empty()
     }
 }
 
@@ -234,6 +281,14 @@ fn from_snapshot_inner(
         let operation = pending.remove(index);
         let state = match result {
             Ok(reading) => {
+                if let BatteryState::Unavailable(error) = &reading.state {
+                    record_capability_failure(
+                        &mut snapshot,
+                        &operation.key,
+                        &operation.component,
+                        error,
+                    );
+                }
                 reading
                     .facts
                     .apply_to(&mut snapshot.devices[operation.device_index]);
@@ -241,6 +296,12 @@ fn from_snapshot_inner(
             }
             Err(error) => {
                 snapshot.devices[operation.device_index].issue = Some(error.clone());
+                record_capability_failure(
+                    &mut snapshot,
+                    &operation.key,
+                    &operation.component,
+                    &error,
+                );
                 BatteryState::Unavailable(error)
             }
         };
@@ -429,5 +490,54 @@ mod tests {
 
         drop(refresh);
         release_hid_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn battery_errors_are_capability_scoped_and_keep_confirmed_connection() {
+        let unavailable = HardwareError::new(ErrorKind::Timeout, "no device reply");
+        let unavailable_reading = BatteryReading {
+            state: BatteryState::Unavailable(unavailable.clone()),
+            facts: DeviceFacts {
+                connection: Some(Connection::Connected),
+                ..DeviceFacts::default()
+            },
+        };
+        let unavailable_battery = Battery::new(move || Ok(unavailable_reading.clone()));
+        let failed_battery =
+            Battery::new(move || Err(HardwareError::new(ErrorKind::Transport, "read failed")));
+        let mut first = make_device(
+            "test.power",
+            "state-unavailable",
+            "unavailable",
+            unavailable_battery,
+        );
+        let mut second = make_device(
+            "test.power",
+            "request-error",
+            "request error",
+            failed_battery,
+        );
+        first.connection = Connection::Connected;
+        second.connection = Connection::Connected;
+
+        let report = from_snapshot_with_timeout(
+            Snapshot {
+                devices: vec![first, second],
+                ..Snapshot::default()
+            },
+            Duration::from_secs(1),
+        );
+        assert_eq!(report.snapshot.scoped_failures.len(), 2);
+        assert!(report.snapshot.scoped_failures.iter().all(|failure| {
+            failure.operation == OperationKind::Capability
+                && matches!(failure.scope, FailureScope::Capability { ref id, version: 2, .. } if id == "power.battery")
+        }));
+        assert!(
+            report
+                .snapshot
+                .devices
+                .iter()
+                .all(|device| { device.connection == Connection::Connected })
+        );
     }
 }

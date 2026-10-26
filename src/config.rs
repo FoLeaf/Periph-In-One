@@ -57,6 +57,7 @@ impl Config {
                     2 => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
                     _ => return Err(io::Error::other("不支持的配置版本，请保留原文件")),
                 };
+                crate::migration::normalize_v2(&mut config);
                 if !config.width.is_finite() || !config.height.is_finite() {
                     return Err(io::Error::other("窗口尺寸无效"));
                 }

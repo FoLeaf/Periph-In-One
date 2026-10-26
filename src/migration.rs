@@ -1,6 +1,12 @@
 //! Version-1 knowledge is confined to one-time configuration migration.
-use crate::{battery::SavedBattery, config::Config, model::SavedDevice};
-use periph_hal::{DeviceDescriptor, DeviceKey, HardwareIdentifier, Identity, IdentityKind, Link};
+use crate::{
+    battery::SavedBattery,
+    config::Config,
+    model::{EndpointRoute, SavedDevice},
+};
+use periph_hal::{
+    DeviceDescriptor, DeviceKey, EndpointKey, HardwareIdentifier, Identity, IdentityKind, Link,
+};
 use serde::Deserialize;
 
 #[derive(Default, Deserialize)]
@@ -117,6 +123,16 @@ pub(crate) fn version_one(bytes: &[u8]) -> Result<Config, serde_json::Error> {
             backend: backend.into(),
             local: route,
         };
+        let endpoint = EndpointKey {
+            backend: backend.into(),
+            local: if bluetooth {
+                physical.clone()
+            } else if slot_receiver {
+                physical.split('#').next().unwrap_or(&physical).into()
+            } else {
+                physical.clone()
+            },
+        };
         let mut identities = Vec::new();
         if bluetooth {
             if let Some(address) = physical
@@ -189,8 +205,13 @@ pub(crate) fn version_one(bytes: &[u8]) -> Result<Config, serde_json::Error> {
             alias: old.alias,
             identity_conflict: old.identity_conflict || invalid_serial,
             routes: vec![key.clone()],
+            endpoint_routes: vec![EndpointRoute {
+                route: key.clone(),
+                endpoint: endpoint.clone(),
+            }],
             descriptor: DeviceDescriptor {
                 key,
+                endpoint,
                 target,
                 name: old.hardware_name,
                 roles: vec![role.into()],
@@ -222,4 +243,61 @@ pub(crate) fn version_one(bytes: &[u8]) -> Result<Config, serde_json::Error> {
         });
     }
     Ok(config)
+}
+
+/// Normalize additive endpoint fields on existing v2 records. Platform
+/// identity rules stay at the persistence boundary instead of in live model
+/// reconciliation.
+pub(crate) fn normalize_v2(config: &mut Config) {
+    for saved in &mut config.devices {
+        if saved.descriptor.endpoint.is_empty() {
+            let route = &saved.descriptor.key;
+            let local = if route.backend == "windows.hid" {
+                saved
+                    .descriptor
+                    .identities
+                    .iter()
+                    .find(|identity| {
+                        identity.namespace == "windows.usb-port"
+                            && identity.kind == IdentityKind::Location
+                            && identity.subject == "receiver"
+                    })
+                    .map(|identity| identity.value.clone())
+                    .unwrap_or_else(|| route.local.clone())
+            } else {
+                route.local.clone()
+            };
+            saved.descriptor.endpoint = EndpointKey {
+                backend: route.backend.clone(),
+                local,
+            };
+        }
+        let descriptor_backend = saved.descriptor.key.backend.clone();
+        let descriptor_endpoint = saved.descriptor.endpoint.clone();
+        for route in saved
+            .routes
+            .iter()
+            .chain(std::iter::once(&saved.descriptor.key))
+        {
+            if saved
+                .endpoint_routes
+                .iter()
+                .any(|mapping| &mapping.route == route)
+            {
+                continue;
+            }
+            let endpoint = if route.backend == descriptor_backend {
+                descriptor_endpoint.clone()
+            } else {
+                EndpointKey {
+                    backend: route.backend.clone(),
+                    local: route.local.clone(),
+                }
+            };
+            saved.endpoint_routes.push(EndpointRoute {
+                route: route.clone(),
+                endpoint,
+            });
+        }
+    }
 }
