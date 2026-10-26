@@ -5,7 +5,7 @@
 | 入口 | 执行内容 | 产物 |
 | --- | --- | --- |
 | 分支 push、Pull Request、手动运行 CI | 格式 → Windows 测试 → Clippy → Release 构建 → 打包 | Actions artifact，保留 14 天 |
-| 推送 `v*` 标签 | 复用完整 CI → 下载该次构建产物 → 验证 SHA256 → 创建 Release 草稿 | 便携 ZIP、ZIP 的 `SHA256SUMS.txt`、自动生成的发布说明 |
+| 推送 `v*` 标签 | 复用完整 CI → 下载产物 → 配置公钥后进入受保护签名 job → 验证 → 创建 Release 草稿 | 便携 ZIP、已配置签名时的 OTA ZIP、`SHA256SUMS.txt`、自动发布说明 |
 
 格式检查使用 Ubuntu；Portable HAL 在 Ubuntu 测试关闭默认 features 的独立库、可选 serde 及 Clippy。程序测试、Slint 编译、资源嵌入和打包使用 Windows Server 2022 + x64 MSVC。所有 Cargo 构建和依赖解析保留 `--locked`。工具链沿用 stable；Cargo / 构建缓存使用 `Swatinem/rust-cache`，只有 main 更新缓存。
 

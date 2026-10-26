@@ -16,6 +16,6 @@ cargo test -p ota-lab --locked --all-targets
 
 签名测试通过回环 HTTP 下载 zipsign ZIP，验证大小上限、原文件名绑定、错公钥和截断包拒绝。库允许空公钥直接返回成功，应用必须显式拒绝空信任集。
 
-本轮证据只覆盖进程运行时的文件系统操作，**不代表断电、事务恢复和杀毒隔离验收已经通过**。不能据此直接开启 stable OTA。正式事务须先复制并刷盘备份，再用库的直接替换提交，不得回到先挪走入口的方案。
+本原型证据只覆盖进程运行时的文件系统操作，**不代表完整进程交接、断电和杀毒隔离验收已经通过**。后续文件事务恢复用例和包体积实测见 [实施记录](../../docs/OTA-UPDATE.md)。不能据此直接开启 stable OTA。正式事务先复制并刷盘备份，再用库的直接替换提交，不得回到先挪走入口的方案。
 
 库源码：[Move](https://docs.rs/self_update/1.3.2/self_update/struct.Move.html)、[MoveAll](https://docs.rs/self_update/1.3.2/self_update/struct.MoveAll.html)、[self-replace Windows](https://github.com/mitsuhiko/self-replace/blob/1.5.0/src/windows.rs)。

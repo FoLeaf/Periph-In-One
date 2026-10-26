@@ -11,7 +11,7 @@
 
 **Periph In One** 是面向 Windows 10/11 x64 的便携外设电量工具。把支持的 2.4G 接收器接到电脑，即可在一个面板里查看电量；收起窗口后，从系统托盘随时唤出。
 
-Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当前版本 **0.22.0**。
+Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当前发布版本 **0.22.0**；此分支包含默认关闭的 OTA 测试实现。
 
 ## 界面一览
 
@@ -32,11 +32,13 @@ Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当�
 <details>
 <summary>设备备注与设置</summary>
 
-为设备设置备注，查看并复制硬件标识；设置中可切换开机启动。
+为设备设置备注，查看并复制硬件标识；设置中可切换开机启动和自动更新。发现新版本后，点击设置左侧的 up 图标查看对应 Release 的更新说明。
 
 ![设备备注：硬件名称、接收器序列号、VID/PID 与备注输入框](assets/readme/remark.png)
 
-![设置：开机启动开关](assets/readme/settings.png)
+![设置：开机启动与自动更新开关](assets/readme/settings.png)
+
+![更新窗口：Release 更新说明与重启操作，图中为布局示例](assets/readme/update.png)
 
 </details>
 
@@ -50,7 +52,7 @@ Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当�
 - 设备备注、历史电量与窗口尺寸保存在 EXE 同级的 `config/settings.json`。移动程序时一起移动 `config/`。
 - 旧配置自动迁移，保留备注与历史；首次保存前生成 `settings.json.v1.bak` 原文件备份。
 - 开机启动默认关闭，可在设置中开启。自启时直接进入托盘。
-- 默认不联网、不遥测、不写日志；配置文件包含本机设备信息，请勿公开上传。
+- 自动更新目前为默认关闭的测试实现。配置签名的构建启用后会访问 GitHub，不上传设备信息或遥测；更新诊断仅存本机 `.ota/`。配置文件包含本机设备信息，请勿公开上传。
 
 ## 支持的设备
 
@@ -81,17 +83,17 @@ Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当�
 git clone https://github.com/FoLeaf/Periph-In-One.git
 cd Periph-In-One
 cargo test --workspace --locked --all-targets
-.\scripts\build-windows.ps1
+cargo build --locked --release -p periph-in-one
 .\target\release\periph-in-one.exe
 ```
 
 创建便携 ZIP：
 
 ```powershell
-.\scripts\package.ps1
+cargo run --locked --release -p ota-release -- prepare target/release/periph-in-one.exe dist 0.22.0
 ```
 
-生成 `dist/periph-in-one-0.22.0-windows-x64.zip`，包含程序、文档、图片、校验和与依赖许可，不包含本机配置。默认从 `target/release/` 取程序，可通过 `-Executable` 指定其他构建路径；已有同名 ZIP 时会拒绝覆盖。
+生成完整便携 ZIP 和未签名 OTA ZIP，来自同一 EXE。完整包包含程序、文档、图片、校验和与依赖许可，不包含本机配置；已有同名 ZIP 时拒绝覆盖。未签名 OTA 仅供发行流水线处理，客户端不会安装。正式密钥配置与验收进度见 [OTA 实施记录](docs/OTA-UPDATE.md)。
 
 GitHub Actions 在分支 push / PR 时执行格式、Windows MSVC 测试、Clippy、Release 构建和打包，产物保留 14 天。推送与 Cargo 版本一致的 `v*` 标签会复用完整检查，生成附带 ZIP 和 SHA256 的 Release 草稿，真机验收后手动公开。详见 [CI / CD 流程](.github/CICD.md)。Windows 10、多屏和不同 DPI 场景仍需要真机验证。
 
