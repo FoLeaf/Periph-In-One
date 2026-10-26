@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
+  PERIPH_OTA_PUBLIC_KEYS: ${{ vars.PERIPH_OTA_PUBLIC_KEYS }}
 
 jobs:
   format:
@@ -84,21 +85,32 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Build release
-        run: ./scripts/build-windows.ps1
-      - name: Package portable ZIP
-        run: ./scripts/package.ps1
+        run: |
+          cargo build --locked --release -p periph-in-one -p ota-release
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+      - name: Package portable and unsigned OTA from the same EXE
+        run: |
+          $json = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read version' }
+          $package = ($json | ConvertFrom-Json).packages | Where-Object name -eq 'periph-in-one'
+          ./target/release/ota-release.exe prepare target/release/periph-in-one.exe dist $package.version
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
       - name: Hash distribution
         run: |
           $archives = @(Get-ChildItem -Path dist/*.zip -File)
-          if ($archives.Count -ne 1) { throw 'Expected exactly one portable ZIP' }
-          $archive = $archives[0]
-          $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $($archive.Name)" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          if ($archives.Count -ne 2) { throw 'Expected portable and unsigned OTA ZIPs' }
+          $lines = foreach ($archive in $archives) {
+            $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($archive.Name)"
+          }
+          $lines | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          Copy-Item -LiteralPath target/release/ota-release.exe -Destination dist
       - uses: actions/upload-artifact@v7
         with:
           name: periph-in-one-windows-x64
           path: |
             dist/*.zip
             dist/SHA256SUMS.txt
+            dist/ota-release.exe
           if-no-files-found: error
           retention-days: 14

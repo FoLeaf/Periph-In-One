@@ -3990,6 +3990,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ota-release"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "periph-in-one",
+ "semver",
+ "serde_json",
+ "tempfile",
+ "zip 9.1.2",
+ "zipsign-api",
+]
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4103,12 +4116,17 @@ name = "periph-in-one"
 version = "0.22.0"
 dependencies = [
  "chrono",
+ "getrandom 0.4.3",
+ "hex",
  "hidapi",
  "periph-hal",
  "png",
  "raw-window-handle",
+ "self_update",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "slint",
  "slint-build",
  "tempfile",
@@ -4116,6 +4134,7 @@ dependencies = [
  "windows",
  "windows-sys 0.61.2",
  "winresource",
+ "zip 9.1.2",
 ]
 
 [[package]]
@@ -5004,6 +5023,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"

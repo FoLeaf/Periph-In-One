@@ -16,9 +16,57 @@ jobs:
     name: Validate and package
     uses: ./.github/workflows/ci.yml
 
+  sign:
+    name: Sign and verify OTA
+    needs: build
+    if: vars.PERIPH_OTA_PUBLIC_KEYS != ''
+    runs-on: windows-2022
+    timeout-minutes: 10
+    environment: ota-signing
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: periph-in-one-windows-x64
+          path: dist
+      - name: Validate trusted build and sign OTA
+        env:
+          PERIPH_OTA_SIGNING_SEED: ${{ secrets.PERIPH_OTA_SIGNING_SEED }}
+        run: |
+          $lines = Get-Content -LiteralPath dist/SHA256SUMS.txt
+          foreach ($line in $lines) {
+            $hash, $name = $line -split '  ', 2
+            if ($name -notmatch '^periph-in-one-[0-9A-Za-z.+-]+-windows-x64(-ota)?\.zip$') { throw 'Unexpected artifact name' }
+            if ((Get-FileHash -LiteralPath "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash) { throw 'Build checksum mismatch' }
+          }
+          $ota = @(Get-ChildItem -Path dist/*-ota.zip -File)
+          if ($ota.Count -ne 1) { throw 'Expected one OTA package' }
+          ./dist/ota-release.exe sign $ota[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'OTA signing or verification failed' }
+      - name: Reverify and hash final immutable assets
+        run: |
+          $ota = Get-ChildItem -Path dist/*-ota.zip -File
+          ./dist/ota-release.exe verify $ota.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Client verification failed' }
+          $lines = foreach ($archive in (Get-ChildItem -Path dist/*.zip -File)) {
+            $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($archive.Name)"
+          }
+          $lines | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: periph-in-one-windows-x64-signed
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
   draft:
     name: Create release draft
-    needs: build
+    needs: [build, sign]
+    if: always() && needs.build.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -26,7 +74,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: periph-in-one-windows-x64
+          name: ${{ needs.sign.result == 'success' && 'periph-in-one-windows-x64-signed' || 'periph-in-one-windows-x64' }}
           path: dist
       - name: Verify distribution checksum
         working-directory: dist
@@ -36,6 +84,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          OTA_SIGNED: ${{ needs.sign.result == 'success' }}
         run: |
-          gh release create "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS.txt \
+          cd dist
+          assets=()
+          for file in *.zip; do
+            if [[ "$file" != *-ota.zip || "$OTA_SIGNED" == 'true' ]]; then
+              assets+=("$file")
+            fi
+          done
+          sha256sum "${assets[@]}" > SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" "${assets[@]}" SHA256SUMS.txt \
             --verify-tag --draft --generate-notes --title "$RELEASE_TAG"

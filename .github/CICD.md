@@ -11,7 +11,13 @@
 
 同分支的新提交会取消旧 CI；标签发布不自动取消。普通检查只有仓库读取权限，仅创建草稿的 job 具有 `contents: write`。无需个人访问令牌，使用该次运行的 `GITHUB_TOKEN`。工作流不使用 `pull_request_target`，不把写权限交给 PR 构建。
 
-CI 调用已有 PowerShell 构建和打包脚本，ZIP 包含许可声明与程序自身的校验和；外层 `SHA256SUMS.txt` 校验整个 ZIP。Release 不重新构建、不覆盖现有发布。同一标签重跑时，已有 Release 会使创建步骤失败；修正问题后发布新版本，不移动已公开标签。
+CI 使用 Rust `ota-release prepare`，从同一 EXE 生成完整便携 ZIP 和包含 `ota.json`、EXE、依赖许可的 OTA ZIP；外层 `SHA256SUMS.txt` 校验整个 ZIP。Release 不重新构建主程序、不覆盖现有发布。同一标签重跑时，已有 Release 会使创建步骤失败；修正问题后发布新版本，不移动已公开标签。
+
+配置仓库变量 `PERIPH_OTA_PUBLIC_KEYS`（逗号分隔的 32 字节公钥十六进制）后，构建将公钥编入客户端与发行验证工具。Release 的签名 job 使用 `ota-signing` 环境中的 `PERIPH_OTA_SIGNING_SEED` secret（32 字节种子十六进制），签名后使用客户端相同入口重新验包，再生成外层校验和。私钥只传入签名步骤的环境，不写命令行、源码或普通 PR CI。必须在 GitHub 手动为 `ota-signing` 配置保护规则和允许的受信发布标签；YAML 本身不会创建保护规则或密钥。
+
+未配置公钥时只发布完整便携 ZIP，**不会把未签名 OTA 上传到 Release，也不会退回安装完整包**。已配置公钥但 secret 缺失、不匹配或验包失败时，Release 草稿创建失败。公开发布仍需人工完成真实跨版本与回退验收，普通 CI 通过不代表 stable 默认开启的门槛已通过。
+
+本地打包：`cargo run --locked -p ota-release -- prepare <EXE路径> dist <版本>`；已签名包复验：`cargo run --locked -p ota-release -- verify <OTA路径>`。后者要求构建时已经配置正式公钥，不会接受空信任集。
 
 ## 发布一个版本
 
