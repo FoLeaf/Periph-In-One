@@ -11,9 +11,9 @@
 | 协议家族 | `crates/periph-hal/src/protocol.rs` | 报文构造、校验和解析的纯函数，不执行 I/O |
 | HID 驱动 | `crates/periph-hal/src/windows/vendor/` | 精确匹配、协议组合、设备角色和能力结果；不生成界面文案 |
 | Windows 访问后端 | `crates/periph-hal/src/windows/` | `hid.rs` 发现与分发、`transport.rs` 原生 I/O、`topology.rs` 拓扑与元数据、`bluetooth.rs` 系统属性 |
-| 应用刷新 | `src/hardware.rs`、`src/devices.rs` | 先发现、后显式调用所需能力；不再转换旧 Reading |
+| 应用刷新 | `src/hardware.rs`、`src/devices.rs` | 通过可取消 `RefreshSession` 增量 poll 各 backend 与已投递能力；不再转换旧 Reading |
 | 应用业务 | `src/model.rs`、`src/battery.rs`、`src/config.rs` | 通用身份与备注、独立电量历史、配置保存 |
-| 配置迁移 | `src/migration.rs` | 仅在读取 v1 时解释旧字段，保留 ID、备注及历史 |
+| 配置迁移 | `src/migration.rs` | 读取 v1 旧字段并归一化既有 v2 endpoint/component，保留 ID、备注及历史 |
 
 新增同能力协议不修改公共核心或应用规则；新增领域在独立模块实现 `Capability`，不向公共设备结构增加功能字段。能力值可以是观测或领域客户端；当前真实落地的是电量，连续数据和写能力待实际需求实现自己的接口与会话。
 
@@ -40,9 +40,9 @@
 
 ## 4. 能力与状态
 
-`Capabilities::insert` 按目标组件、契约 ID 和版本注册能力；应用用 `get::<T>` 访问。新增能力在下游模块实现 `Capability`，不扩充公共枚举或建立字符串 RPC。
+能力按 `ComponentKey`、契约 ID 和版本注册；应用用 `get::<T>` 或 `get_component::<T>` 访问。旧字符串 `insert/get` 是 `legacy` 命名空间的兼容入口。新增能力在下游模块实现 `Capability`，可通过 `bind_executor` 提供 backend 所属线程上的 typed 操作；核心不依赖具体领域能力或建立字符串 RPC。
 
-发现只提供 `Battery` 客户端，不采样电量；调用 `Battery::read()` 才执行读取。读取结果带独立的设备事实。新实时客户端须实现 invalidate；电量客户端在重新发现、关闭和发现失败后撤销，失效的克隆不能执行 I/O。
+发现只提供 `Battery` 客户端，不采样电量；调用 `Battery::read()` 才执行读取。读取结果带独立的设备事实。新实时客户端须实现 invalidate；电量客户端在重新发现、关闭和发现失败后撤销，失效的克隆不能执行 I/O。queued operation 在 backend worker 进入 I/O 前检查当前 generation；后端和原生句柄固定在专属 worker 上创建与使用，不要求 `Send`。
 
 - `BatteryState::Value`：0..=100 的有效观测，带 DeviceResponse / SystemCache 来源及观察时间。
 - `Unsupported`：型号或能力查询明确证明不支持。超时、未知特征和缺属性不能转换成它。
@@ -56,7 +56,7 @@
 1. **研究**：先查现有协议、依赖和开源实现。需要协议探针时写 `examples/probe_<vendor>.rs`，结论注明来源、许可及未验证边界；报文函数不复制。
 2. **实现**：已有 HID 访问方式新增私有驱动及协议纯函数，注册 `ADAPTERS`；新访问方式实现 Backend 的 inventory/discover。身份与拓扑查询留在发现，能力操作由独立客户端执行；平台句柄留在后端内部。
 3. **能力**：返回公共设备描述和实际能力。电量、连接、错误分别表达；没有电池的设备不创建伪电量。
-4. **身份**：协议能报告本体 UID 则提供对应凭据；路由与身份分开。HID 多槽位的 HAL 路由始终含槽号，应用旧记录兼容不得泄漏进 HAL。
+4. **身份**：协议能报告本体 UID 则提供对应凭据；路由与身份分开。`DeviceDescriptor.endpoint` 显式描述共享访问端点；`ComponentDescriptor{key,parent,roles,claims}` 显式描述子组件，key 来自协议稳定标识，claim 来自可靠身份证据，不能由名称或数组顺序猜测。`CapabilityDescriptor.component` 必须引用对应组件 key。HID 多槽位的 HAL 路由始终含槽号，应用旧记录兼容不得泄漏进 HAL。
 5. **测试**：协议测试覆盖正常、截断、坏帧、校验、电量边界，确认零的实际语义。HAL 扩展测试放 `crates/periph-hal/tests/`；应用身份兼容测试放 `tests/`。
 6. **文档**：更新 README 兼容表和实际验证记录；不把伪后端测试写成真实硬件支持。原始安装包、设备序列号和整份抓包不入库。
 7. **检查**：执行 fmt、workspace all-targets 测试和 Clippy；独立库同时检查关闭默认 features 的可移植构建。相关硬件变更运行 `--once`、`--list-devices`，记录环境及未测部分。
@@ -65,9 +65,13 @@
 
 HAL 提供带命名空间、主体和目标作用域的身份证据；应用优先使用本体 UID、地址和可靠序列号，其次位置与来源内路由。强身份矛盾不能通过同路径兜底覆盖，重复序列号、冲突备注和手动恢复继续受到保护。
 
-应用直接保存通用描述。v1 配置在 `src/migration.rs` 中迁至 v2，保留旧记录 ID、备注与历史；第一次保存之前备份原始字节至 settings.json.v1.bak。旧单接收器键或蓝牙路径前缀不参与新的运行时规则。
+应用保存通用设备描述与 `SavedComponent`。组件 ID 独立于设备 ID 和来源 component key；归并通过 component route bindings 与确认 remap 返回给领域服务，`SavedBattery.component` 只保存 opaque persistent component ID。跨来源仅唯一可靠 claim 可以关联，claim 缺失时保留来源路由边界；同路由出现矛盾强 claim 时保留旧历史。传统 `legacy/main` 是设备根电量组件，同一设备的所有来源共用精确 ID `main`，兼容已有历史和 UI 查询。耳机左右耳与盒子须用协议稳定 key/claim，不能按扫描次序推断。
 
-`Hardware::discover()` 分别返回设备与能力客户端、完成的后端及后端失败；不能把失败或未覆盖来源的缺席视作确认离线。后端仍按序同步执行，尚不提供并行调度、推送生命周期或可强制中断的系统调用；应用在后台线程长期持有 Hardware 并显式读取电量。
+v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与隐式 `main` 组件路由，保留旧记录 ID、备注与历史，首次保存前备份原始字节至 settings.json.v1.bak。旧单接收器键或平台位置只在迁移边界解释。
+
+`DiscoveryReport` 与 `InventoryReport` 分开携带结果、覆盖范围和 scoped failures，范围可指向 backend、endpoint、device、component 或 capability，并标记 discovery/inventory/capability 操作。Windows HID 按 ContainerId 分组接收器接口，并将 endpoint 显式写入 descriptor；endpoint 失败 withheld 该接收器旧槽，其他成功范围可正常更新离线。Battery Err/Unavailable 只属于 capability 范围，不否定连接。
+
+`Hardware::discovery_stream()` 为 backend 独立调度；应用 `RefreshSession` 按就绪顺序 poll 所有发现与能力响应，快速来源可先进入 UI 状态。默认整轮 deadline 为 20 秒。取消唤醒应用等待；超时后无法安全中断的原生同步调用可继续留在固定 worker 执行，UI 退出不 join worker，迟到结果按 generation 丢弃且迟到能力客户端撤销。
 
 ## 7. 范例
 
@@ -179,6 +183,14 @@ HAL 提供带命名空间、主体和目标作用域的身份证据；应用优�
 - 计数伪后端确认发现不采样电量、客户端可独立重复读取，以及重发现、失败、显式关闭和 Hardware 关闭会撤销客户端及克隆。这些是接口测试，不代表媒体或新协议真机支持。
 - 当前机器的 `--list-devices` 与 `--once` 成功。KZZI K75 报告不提供电量；HID zkm 与 NK mouse NANO dongle 未响应；OPPO Enco Air4 离线。本轮没有取得新的鼠标或蓝牙有效电量，不沿用第 8 节的历史 100% 作为本轮实测结果。
 - 总览、备注和设置截图由当前 Slint 渲染，使用明确标记的演示数据；已检查总览与备注布局。未复验蓝牙在线电量、罗技一拖多、AULA 新款协议、休眠/热插拔与完整窗口生命周期。
+
+## 10. 后端调度、故障覆盖和组件身份验证（2026-10-26）
+
+- HAL 为 backend 独立 worker 和能力 executor 提供稳定调度，默认整轮 deadline 20 秒；合成测试覆盖 non-Send backend 线程绑定、排队失效检查、慢后端隔离、迟到代次和可取消等待。`inventory()` 保持被动，不推进 capability generation。
+- `DiscoveryReport`/`InventoryReport` 携带覆盖范围和结构化故障；Windows HID 按 ContainerId 分组 receiver interfaces，并显式提供 endpoint。单目标已识别失败仍保留 Unknown+issue 设备，多目标拓扑未知时 withheld 该 endpoint。Battery Err 和 Unavailable 作为 capability failure，不推导离线。
+- HAL 显式描述 `ComponentDescriptor`、`ComponentKey`、`ComponentClaim` 和 capability 的组件引用。应用使用 `SavedComponent` 绑定来源 route 到 persistent ID；唯一可靠 claim 跨来源/重连生效，同来源重复 claim 歧义和冲突强 claim 会保留分开的历史。`legacy/main` 保持每设备精确 ID `main`。
+- Windows workspace suite 中实际启动的 HAL、应用 unit、battery、core、migration suites 共 71 项通过；`tests/model.exe` 被 Windows 拒绝启动（os error 5），15 项只完成编译。相同模型 suite `--no-run` 成功，Clippy all-targets 与 fmt 通过。独立 HAL 在 Linux target 的 no-default-features / serde tests 编译通过，未在 Linux 运行测试。
+- 未做真机组件 claim 或多电池 GATT 验证；当前 Bluetooth/HID 适配只暴露协议确实可确认的电池组件。合成的耳机左右耳/盒子测试验证身份模型，不代表已有真机适配。
 
 ## 附录 A：KZZI 258A 有线型号表（已识别档）
 
