@@ -300,3 +300,11 @@ v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与�
 | 384C | 3 | FFA8 | |
 | 6D66 | 1 | FF60:0061 | 8572 无线键盘 |
 | B6A4 / A8A4 / A8A5 | 5 | FF01 | AULA L3 耳机线 |
+
+## 2026-10-27 K75 灯效修正
+
+来源为 [KZZI 官方驱动](https://www.kzzi.com/download/1/) KZZI RGB Keyboard V2.6（20260824）；DeviceDriver.exe SHA-256 `2a35647a6d3e65b222e4b9daabcae388683da4f5ba84b15ce55240b09ed77079`。使用 innoextract 1.9（zlib/libpng 许可）仅提取资源，未复制厂商代码。`Dev/0112/KB.ini` 的 `Fw=1`、`Psd=2,0,0,0,0,37` 对应 K75 RGB key；`Dev/sc/led.xml` 的 `tc_eft10` 是川流不息，`tc_eft11` 才是随波逐流。驱动 `0x42478B` 的 Fw 分支选择 `tc_eft%d`，不能混用另两套 `tc_led` / `tc_led_mode` 表。
+
+开灯设配置 byte 10 为 11，参数 byte 78/79 为 `04 27`（亮度 4、速度 2、彩色 7）；关闭使用 byte 10 = 0。只修改相关灯效字段，读配置失败立即返回，不用空白数据覆盖配置；回读检查效果、亮度、速度和彩色设置。写能力仅注册于 PSD `[2,0,0,0,0,55]`，其他共享 `3554:FA09` 的机型保持其既有识别和电量能力，灯效等待各自证据。
+
+诊断使用 `cargo run --locked --example probe_kzzi`（默认只读，`--on` / `--off` 显式切换），复用 HAL 协议构造器与传输。当前 K75 已完成写入及读回验证；视觉效果仍需用户观察确认。安装包、提取资源与配置原文均不入库。

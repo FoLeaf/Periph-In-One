@@ -415,7 +415,7 @@ pub fn kzzi_parse_lighting_profile(pages: &[[u8; 20]; 10]) -> Option<[u8; 128]> 
             return None;
         }
         let len = frame[4] as usize;
-        if len > 14 || offset + len > 128 {
+        if len != (128 - offset).min(14) {
             return None;
         }
         profile[offset..offset + len].copy_from_slice(&frame[5..5 + len]);
@@ -444,23 +444,34 @@ pub fn kzzi_profile_is_lit(profile: &[u8; 128]) -> bool {
 }
 
 /// Modify profile for target lighting state:
-/// - enabled = true: effect 10 (随波逐流), brightness 4, speed 2, colorful flag 0x07.
+/// - enabled = true: effect 11 (随波逐流), brightness 4, speed 2, colorful flag 0x07.
 /// - enabled = false: effect 0 (关闭灯光).
+///
+/// K75 RGB key uses the official driver's `tc_eft` table: 10 is 川流不息,
+/// 11 is 随波逐流. Other Compx models need their own verified mapping.
 pub fn kzzi_create_lighting_profile(original: &[u8; 128], enable: bool) -> [u8; 128] {
     let mut profile = *original;
-    profile[3] = 0x01;
-    profile[9] = 0x00;
     if enable {
-        const STREAM_EFFECT: u8 = 10;
+        const STREAM_EFFECT: u8 = 11;
+        profile[9] = 0x00;
         profile[10] = STREAM_EFFECT;
         let param_offset = 56 + (STREAM_EFFECT as usize) * 2;
         profile[param_offset] = 4;
         profile[param_offset + 1] = (2 << 4) | 0x07;
-        profile[12] = 0x01;
     } else {
         profile[10] = 0;
     }
     profile
+}
+
+/// Match the requested effect and its parameters, rather than any lit effect.
+pub fn kzzi_lighting_matches(profile: &[u8; 128], on: bool) -> bool {
+    *profile == kzzi_create_lighting_profile(profile, on)
+}
+
+/// Only this PSD has K75 lighting layout/effect evidence and live readback.
+pub fn kzzi_lighting_supported(psd: &[u8]) -> bool {
+    psd == [2, 0, 0, 0, 0, 55]
 }
 
 /// Split 128-byte profile into 10 chunked frames for writing (command 0x04, subcommand 10).

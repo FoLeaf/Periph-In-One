@@ -186,7 +186,9 @@ fn atk_ff05_dpi_frames_and_checksum() {
     assert_eq!(config_req[0], 8);
     assert_eq!(config_req[2], 0x72);
     assert_eq!(config_req[6], 0x09); // GetCurrentMouseConfig
-    let expected_config_sum = config_req[2..].iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
+    let expected_config_sum = config_req[2..]
+        .iter()
+        .fold(0u8, |sum, &b| sum.wrapping_add(b));
     assert_eq!(config_req[1], expected_config_sum);
 
     let mut reply = [0u8; 64];
@@ -208,8 +210,8 @@ fn kzzi_lighting_profile_split_parse_and_toggle() {
 
     let on_profile = kzzi_create_lighting_profile(&dummy_profile, true);
     assert!(kzzi_profile_is_lit(&on_profile));
-    assert_eq!(on_profile[10], 10);
-    assert_eq!(on_profile[56 + 10 * 2], 4); // brightness 4
+    assert_eq!(on_profile[10], 11); // Official tc_eft11 = 随波逐流
+    assert_eq!(&on_profile[78..80], &[4, 0x27]);
 
     let frames = kzzi_split_lighting_profile(&on_profile);
     assert_eq!(frames.len(), 10);
@@ -231,4 +233,54 @@ fn kzzi_lighting_profile_split_parse_and_toggle() {
     let save_frame = kzzi_save_lighting_request();
     assert!(kzzi_frame_ok(&save_frame));
     assert_eq!(save_frame[1], 0x0A);
+}
+
+#[test]
+fn kzzi_lighting_uses_official_effect_and_preserves_other_settings() {
+    let mut original = std::array::from_fn(|index| index as u8);
+    original[126..].copy_from_slice(&[0x5a, 0xa5]);
+    let on = kzzi_create_lighting_profile(&original, true);
+    for index in 0..128 {
+        if ![9, 10, 78, 79].contains(&index) {
+            assert_eq!(on[index], original[index], "unrelated byte {index}");
+        }
+    }
+    assert_eq!(&on[78..80], &[4, 0x27]);
+    assert_eq!(on[10], 11);
+    assert!(kzzi_lighting_matches(&on, true));
+    for (index, value) in [(10, 10), (78, 1), (79, 0x47), (9, 1)] {
+        let mut wrong = on;
+        wrong[index] = value;
+        assert!(!kzzi_lighting_matches(&wrong, true));
+    }
+    let off = kzzi_create_lighting_profile(&on, false);
+    assert!(kzzi_lighting_matches(&off, false));
+    assert_eq!(&off[11..], &on[11..]);
+    assert!(kzzi_lighting_supported(&[2, 0, 0, 0, 0, 55]));
+    assert!(!kzzi_lighting_supported(&[2, 0, 0, 0, 0, 54]));
+    assert!(!kzzi_lighting_supported(&[3, 0, 0, 0, 1, 11]));
+}
+
+#[test]
+fn kzzi_lighting_rejects_malformed_pages() {
+    let mut profile = [0; 128];
+    profile[126..].copy_from_slice(&[0x5a, 0xa5]);
+    let pages = kzzi_split_lighting_profile(&profile);
+    let mut bad = pages;
+    bad[0][19] ^= 1;
+    assert!(kzzi_parse_lighting_profile(&bad).is_none());
+    let mut bad = pages;
+    bad.swap(0, 1);
+    assert!(kzzi_parse_lighting_profile(&bad).is_none());
+    for frame in [
+        kzzi_chunk_frame(0x44, 10, 0, &[0; 13]),
+        kzzi_chunk_frame(0x45, 10, 0, &[0; 14]),
+        kzzi_chunk_frame(0x44, 9, 0, &[0; 14]),
+    ] {
+        let mut bad = pages;
+        bad[0] = frame;
+        assert!(kzzi_parse_lighting_profile(&bad).is_none());
+    }
+    profile[127] = 0;
+    assert!(kzzi_parse_lighting_profile(&kzzi_split_lighting_profile(&profile)).is_none());
 }

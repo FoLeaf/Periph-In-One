@@ -191,10 +191,10 @@ fn dpi_and_lighting_capabilities_support_state_manipulation_and_invalidation() {
     let light = periph_hal::lighting::Lighting::new(TestLightingController {
         on: light_state.clone(),
     });
-    assert_eq!(light.read_state().unwrap(), false);
+    assert!(!light.read_state().unwrap());
     light.set_state(true).unwrap();
-    assert_eq!(light_state.load(Ordering::SeqCst), true);
-    assert_eq!(light.read_state().unwrap(), true);
+    assert!(light_state.load(Ordering::SeqCst));
+    assert!(light.read_state().unwrap());
 
     light.close();
     assert!(light.read_state().is_err());

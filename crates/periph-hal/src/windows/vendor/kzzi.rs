@@ -77,6 +77,14 @@ impl VendorAdapter for KzziKeyboard {
         capabilities: &mut crate::Capabilities,
     ) {
         let path = info.path().to_string_lossy().to_string();
+        let supported = KzziLink::open(&path)
+            .and_then(|link| identify_psd(&link))
+            .ok()
+            .flatten()
+            .is_some_and(|psd| protocol::kzzi_lighting_supported(&psd));
+        if !supported {
+            return;
+        }
         let controller = KzziLightingController { path, lock };
         let _ = capabilities.insert("main", Lighting::new(controller));
     }
@@ -111,12 +119,16 @@ fn read_lighting_state(link: &KzziLink) -> Result<bool, HardwareError> {
 }
 
 fn set_lighting_state(link: &KzziLink, on: bool) -> Result<(), HardwareError> {
-    let original = read_profile(link).unwrap_or_else(|_| {
-        let mut def = [0u8; 128];
-        def[126] = 0x5a;
-        def[127] = 0xa5;
-        def
-    });
+    // Never replace unread configuration with zeroes: it also contains
+    // unrelated keyboard settings.
+    let psd = identify_psd(link)?;
+    if !psd.is_some_and(|psd| protocol::kzzi_lighting_supported(&psd)) {
+        return Err(HardwareError::new(
+            ErrorKind::Unsupported,
+            "unverified keyboard lighting profile",
+        ));
+    }
+    let original = read_profile(link)?;
     let modified = protocol::kzzi_create_lighting_profile(&original, on);
     let frames = protocol::kzzi_split_lighting_profile(&modified);
     let mut buffer = [0u8; 64];
@@ -130,7 +142,7 @@ fn set_lighting_state(link: &KzziLink, on: bool) -> Result<(), HardwareError> {
     std::thread::sleep(Duration::from_millis(80));
 
     let readback = read_profile(link)?;
-    if protocol::kzzi_profile_is_lit(&readback) == on {
+    if protocol::kzzi_lighting_matches(&readback, on) {
         Ok(())
     } else {
         Err(HardwareError::new(
@@ -164,7 +176,9 @@ fn read_profile(link: &KzziLink) -> Result<[u8; 128], HardwareError> {
                 }
             }
         }
-        if count == 10 && let Some(profile) = protocol::kzzi_parse_lighting_profile(&pages) {
+        if count == 10
+            && let Some(profile) = protocol::kzzi_parse_lighting_profile(&pages)
+        {
             return Ok(profile);
         }
     }
@@ -175,6 +189,18 @@ fn read_profile(link: &KzziLink) -> Result<[u8; 128], HardwareError> {
 }
 
 fn identify(link: &KzziLink) -> Result<(String, bool), HardwareError> {
+    Ok(identify_psd(link)?.map_or_else(
+        || (String::new(), false),
+        |psd| {
+            (
+                protocol::compx_model_name(&psd).unwrap_or_default().into(),
+                protocol::kzzi_battery_private(&psd),
+            )
+        },
+    ))
+}
+
+fn identify_psd(link: &KzziLink) -> Result<Option<[u8; 6]>, HardwareError> {
     let mut buffer = [0u8; 64];
     for _ in 0..3 {
         link.drain();
@@ -184,14 +210,11 @@ fn identify(link: &KzziLink) -> Result<(String, bool), HardwareError> {
             if let Some(n) = link.read(&mut buffer, Duration::from_millis(120))
                 && let Some(psd) = protocol::kzzi_identity(&buffer[..n])
             {
-                return Ok((
-                    protocol::compx_model_name(&psd).unwrap_or_default().into(),
-                    protocol::kzzi_battery_private(&psd),
-                ));
+                return Ok(Some(psd));
             }
         }
     }
-    Ok((String::new(), false))
+    Ok(None)
 }
 
 fn probe(info: &DeviceInfo) -> Result<(Option<u8>, String, bool), HardwareError> {
