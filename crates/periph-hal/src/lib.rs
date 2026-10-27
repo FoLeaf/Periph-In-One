@@ -6,8 +6,10 @@
 pub mod battery;
 mod capability;
 mod device;
+pub mod dpi;
 mod error;
 mod hardware;
+pub mod lighting;
 pub mod protocol;
 
 pub use capability::{

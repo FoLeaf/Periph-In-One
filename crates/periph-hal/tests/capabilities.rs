@@ -140,6 +140,67 @@ fn dropping_owner_or_failed_rediscovery_revokes_ports() {
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 }
 
+struct TestDpiController {
+    stage: Arc<AtomicUsize>,
+}
+
+impl periph_hal::dpi::DpiController for TestDpiController {
+    fn read_stage(&self) -> Result<Option<u8>, HardwareError> {
+        Ok(Some(self.stage.load(Ordering::SeqCst) as u8))
+    }
+    fn set_stage(&self, stage: u8) -> Result<(), HardwareError> {
+        self.stage.store(stage as usize, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct TestLightingController {
+    on: Arc<AtomicBool>,
+}
+
+impl periph_hal::lighting::LightingController for TestLightingController {
+    fn read_state(&self) -> Result<bool, HardwareError> {
+        Ok(self.on.load(Ordering::SeqCst))
+    }
+    fn set_state(&self, on: bool) -> Result<(), HardwareError> {
+        self.on.store(on, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn dpi_and_lighting_capabilities_support_state_manipulation_and_invalidation() {
+    let dpi_stage = Arc::new(AtomicUsize::new(2));
+    let dpi = periph_hal::dpi::Dpi::new(
+        vec![400, 800, 1200, 1600],
+        TestDpiController {
+            stage: dpi_stage.clone(),
+        },
+    );
+    assert_eq!(dpi.stages(), &[400, 800, 1200, 1600]);
+    assert_eq!(dpi.read_stage().unwrap(), Some(2));
+    dpi.set_stage(4).unwrap();
+    assert_eq!(dpi_stage.load(Ordering::SeqCst), 4);
+    assert_eq!(dpi.read_stage().unwrap(), Some(4));
+
+    dpi.close();
+    assert!(dpi.read_stage().is_err());
+    assert!(dpi.set_stage(1).is_err());
+
+    let light_state = Arc::new(AtomicBool::new(false));
+    let light = periph_hal::lighting::Lighting::new(TestLightingController {
+        on: light_state.clone(),
+    });
+    assert_eq!(light.read_state().unwrap(), false);
+    light.set_state(true).unwrap();
+    assert_eq!(light_state.load(Ordering::SeqCst), true);
+    assert_eq!(light.read_state().unwrap(), true);
+
+    light.close();
+    assert!(light.read_state().is_err());
+    assert!(light.set_state(false).is_err());
+}
+
 #[test]
 fn explicit_close_revokes_all_clones_without_destroying_device_metadata() {
     let (mut hardware, reads, _) = setup();
