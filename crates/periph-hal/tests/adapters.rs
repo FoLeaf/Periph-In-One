@@ -134,3 +134,74 @@ fn ikf_battery_parses_the_contributor_capture_and_rejects_malformed_headers() {
         assert_eq!(ikf_battery(&boundary), Some(level));
     }
 }
+
+#[test]
+fn vxe_v2_eeprom_dpi_requests_and_replies() {
+    let req = atk_v2_current_dpi_request();
+    assert_eq!(req[0], 8);
+    assert_eq!(req[1], 8);
+    assert_eq!(req[4], 4);
+    assert_eq!(req[5], 1);
+    assert!(atk_v2_ff02_reply_ok(&req));
+
+    // Construct valid GetEEPROM reply for currentDpi = 2 (800 DPI)
+    let mut reply = atk_ff04_request(8);
+    reply[2] = 0; // status
+    reply[4] = 4; // address low byte
+    reply[5] = 1; // data len
+    reply[6] = 2; // stage 2
+    seal(&mut reply);
+
+    assert_eq!(atk_v2_current_dpi(&reply), Some(2));
+
+    // Write request for stage 3
+    let set_req = atk_v2_set_current_dpi_request(3);
+    assert_eq!(set_req[0], 8);
+    assert_eq!(set_req[1], 7);
+    assert_eq!(set_req[4], 4);
+    assert_eq!(set_req[5], 1);
+    assert_eq!(set_req[6], 3);
+    assert!(atk_v2_ff02_reply_ok(&set_req));
+
+    let mut set_reply = atk_ff04_request(7);
+    set_reply[2] = 0;
+    set_reply[4] = 4;
+    seal(&mut set_reply);
+    assert!(atk_v2_set_eeprom_ok(&set_reply, 4));
+}
+
+#[test]
+fn kzzi_lighting_profile_split_parse_and_toggle() {
+    let mut dummy_profile = [0u8; 128];
+    dummy_profile[10] = 0; // off
+    dummy_profile[126] = 0x5a;
+    dummy_profile[127] = 0xa5;
+
+    assert!(!kzzi_profile_is_lit(&dummy_profile));
+
+    let on_profile = kzzi_create_lighting_profile(&dummy_profile, true);
+    assert!(kzzi_profile_is_lit(&on_profile));
+    assert_eq!(on_profile[10], 10);
+    assert_eq!(on_profile[56 + 10 * 2], 4); // brightness 4
+
+    let frames = kzzi_split_lighting_profile(&on_profile);
+    assert_eq!(frames.len(), 10);
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(frame[0], 0x13);
+        assert_eq!(frame[1], 0x04);
+        assert_eq!(frame[2], 10);
+        assert_eq!(frame[3], i as u8);
+        assert!(kzzi_frame_ok(frame));
+    }
+
+    let parsed = kzzi_parse_lighting_profile(&frames).expect("reassembled profile");
+    assert_eq!(parsed, on_profile);
+
+    let off_profile = kzzi_create_lighting_profile(&on_profile, false);
+    assert!(!kzzi_profile_is_lit(&off_profile));
+    assert_eq!(off_profile[10], 0);
+
+    let save_frame = kzzi_save_lighting_request();
+    assert!(kzzi_frame_ok(&save_frame));
+    assert_eq!(save_frame[1], 0x0A);
+}

@@ -115,6 +115,78 @@ pub fn atk_v2_ff02_cid_mid(report: &[u8]) -> Option<(u8, u8, u8)> {
     Some((report[6], report[7], report[8]))
 }
 
+/// Read EEPROM request: GetEEPROM (command 8). Address in big-endian bytes 3..5,
+/// read length in byte 5.
+pub fn atk_v2_eeprom_read_request(address: u16, len: u8) -> [u8; 17] {
+    let mut report = [0; 17];
+    report[0] = 8;
+    report[1] = 0x08;
+    report[2] = 0;
+    report[3] = (address >> 8) as u8;
+    report[4] = address as u8;
+    report[5] = len;
+    report[16] = 0x55u8.wrapping_sub(
+        report[..16]
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+    );
+    report
+}
+
+/// Query current active DPI stage: EEPROM address 4.
+pub fn atk_v2_current_dpi_request() -> [u8; 17] {
+    atk_v2_eeprom_read_request(0x0004, 1)
+}
+
+/// Parse current active DPI stage from GetEEPROM reply.
+/// Matches command 8, status 0, address 4, and valid length >= 1.
+pub fn atk_v2_current_dpi(report: &[u8]) -> Option<u8> {
+    if !atk_v2_ff02_reply_ok(report)
+        || report[1] != 0x08
+        || report[2] != 0
+        || report[4] != 0x04
+        || report[5] < 1
+    {
+        return None;
+    }
+    Some(report[6])
+}
+
+/// Write EEPROM request: SetEEPROM (command 7). Address in big-endian bytes 3..5,
+/// dataValidLen in byte 5, payload from byte 6. Max payload is 10 bytes (6..16).
+pub fn atk_v2_eeprom_write_request(address: u16, data: &[u8]) -> Option<[u8; 17]> {
+    if data.is_empty() || data.len() > 10 {
+        return None;
+    }
+    let mut report = [0; 17];
+    report[0] = 8;
+    report[1] = 0x07;
+    report[2] = 0;
+    report[3] = (address >> 8) as u8;
+    report[4] = address as u8;
+    report[5] = data.len() as u8;
+    report[6..6 + data.len()].copy_from_slice(data);
+    report[16] = 0x55u8.wrapping_sub(
+        report[..16]
+            .iter()
+            .fold(0u8, |sum, &byte| sum.wrapping_add(byte)),
+    );
+    Some(report)
+}
+
+/// Switch current DPI stage (1..=4 for our supported 400, 800, 1200, 1600 slots).
+pub fn atk_v2_set_current_dpi_request(stage: u8) -> [u8; 17] {
+    atk_v2_eeprom_write_request(0x0004, &[stage]).expect("single byte fits EEPROM payload")
+}
+
+/// Verify SetEEPROM reply.
+pub fn atk_v2_set_eeprom_ok(report: &[u8], address: u16) -> bool {
+    atk_v2_ff02_reply_ok(report)
+        && report[1] == 0x07
+        && report[2] == 0
+        && report[4] == (address as u8)
+}
+
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc = 0xffff_u16;
     for &byte in data {
@@ -233,6 +305,117 @@ pub fn kzzi_battery(report: &[u8]) -> Option<(u8, u8)> {
     }
     let (level, state) = (report[5], report[6]);
     ((1..=100).contains(&level)).then_some((level, state))
+}
+
+/// KZZI chunked frame (command, subcommand, sequence, payload).
+/// Report ID 0x13, 20 bytes, checksum in byte 19.
+pub fn kzzi_chunk_frame(command: u8, subcommand: u8, sequence: u8, payload: &[u8]) -> [u8; 20] {
+    let mut frame = [0; 20];
+    frame[0] = 0x13;
+    frame[1] = command;
+    frame[2] = subcommand;
+    frame[3] = sequence;
+    frame[4] = payload.len().min(14) as u8;
+    if !payload.is_empty() {
+        let n = payload.len().min(14);
+        frame[5..5 + n].copy_from_slice(&payload[..n]);
+    }
+    frame[19] = frame[..19]
+        .iter()
+        .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+    frame
+}
+
+/// Read profile request: command 0x44, subcommand 0x01.
+pub fn kzzi_lighting_read_request() -> [u8; 20] {
+    kzzi_chunk_frame(0x44, 0x01, 0, &[])
+}
+
+/// Assemble a 128-byte profile from 10 parsed frames.
+/// Verifies each frame checksum, command 0x44, chunk order, and profile trailer 0x5A 0xA5.
+pub fn kzzi_parse_lighting_profile(pages: &[[u8; 20]; 10]) -> Option<[u8; 128]> {
+    let mut profile = [0u8; 128];
+    let mut offset = 0;
+    for (seq, frame) in pages.iter().enumerate() {
+        if !kzzi_frame_ok(frame)
+            || (frame[1] != 0x44 && frame[1] != 0x04)
+            || frame[2] != 10
+            || frame[3] != seq as u8
+        {
+            return None;
+        }
+        let len = frame[4] as usize;
+        if len > 14 || offset + len > 128 {
+            return None;
+        }
+        profile[offset..offset + len].copy_from_slice(&frame[5..5 + len]);
+        offset += len;
+    }
+    if offset == 128 && profile[126] == 0x5a && profile[127] == 0xa5 {
+        Some(profile)
+    } else {
+        None
+    }
+}
+
+/// Check if the KZZI profile indicates lighting is currently turned on.
+/// Profile byte 10 is the active effect ID (0 = Off), and brightness in table (56 + effect * 2).
+pub fn kzzi_profile_is_lit(profile: &[u8; 128]) -> bool {
+    let effect = profile[10];
+    if effect == 0 {
+        return false;
+    }
+    let param_offset = 56 + (effect as usize) * 2;
+    if param_offset < 126 {
+        profile[param_offset] > 0
+    } else {
+        false
+    }
+}
+
+/// Modify profile for target lighting state:
+/// - enabled = true: effect 10 (随波逐流), brightness 4, speed 2, colorful flag 0x07.
+/// - enabled = false: effect 0 (关闭灯光).
+pub fn kzzi_create_lighting_profile(original: &[u8; 128], enable: bool) -> [u8; 128] {
+    let mut profile = *original;
+    profile[3] = 0x01;
+    profile[9] = 0x00;
+    if enable {
+        const STREAM_EFFECT: u8 = 10;
+        profile[10] = STREAM_EFFECT;
+        let param_offset = 56 + (STREAM_EFFECT as usize) * 2;
+        profile[param_offset] = 4;
+        profile[param_offset + 1] = (2 << 4) | 0x07;
+        profile[12] = 0x01;
+    } else {
+        profile[10] = 0;
+    }
+    profile
+}
+
+/// Split 128-byte profile into 10 chunked frames for writing (command 0x04, subcommand 10).
+pub fn kzzi_split_lighting_profile(profile: &[u8; 128]) -> [[u8; 20]; 10] {
+    let mut frames = [[0u8; 20]; 10];
+    for seq in 0..10 {
+        let start = seq * 14;
+        let end = (start + 14).min(128);
+        frames[seq] = kzzi_chunk_frame(0x04, 10, seq as u8, &profile[start..end]);
+    }
+    frames
+}
+
+/// Latch/save lighting confirmation frame: reportId 0x13, cmd 0x0A, sub 0x01, flag 0x04, 0x07.
+pub fn kzzi_save_lighting_request() -> [u8; 20] {
+    let mut frame = [0; 20];
+    frame[0] = 0x13;
+    frame[1] = 0x0A;
+    frame[2] = 0x01;
+    frame[4] = 0x04;
+    frame[5] = 0x07;
+    frame[19] = frame[..19]
+        .iter()
+        .fold(0u8, |sum, &byte| sum.wrapping_add(byte));
+    frame
 }
 
 /// Model names keyed by the profile signature recorded in the vendor drivers'
