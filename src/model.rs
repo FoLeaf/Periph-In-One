@@ -151,25 +151,6 @@ fn contradictory(a: &DeviceDescriptor, b: &DeviceDescriptor) -> bool {
         })
 }
 
-fn personality_match(a: &DeviceDescriptor, b: &DeviceDescriptor) -> bool {
-    let a_is_gamepad = a.roles.iter().any(|r| r == "input.gamepad");
-    let b_is_gamepad = b.roles.iter().any(|r| r == "input.gamepad");
-    if !a_is_gamepad || !b_is_gamepad {
-        return false;
-    }
-    let a_bbw = a.identifiers.iter().any(|id| {
-        id.namespace == "usb"
-            && id.vendor == 0x413d
-            && matches!(id.product, 0x2104 | 0x2106 | 0x2114)
-    });
-    let b_bbw = b.identifiers.iter().any(|id| {
-        id.namespace == "usb"
-            && id.vendor == 0x413d
-            && matches!(id.product, 0x2104 | 0x2106 | 0x2114)
-    });
-    a_bbw && b_bbw
-}
-
 fn rank(kind: IdentityKind) -> u8 {
     match kind {
         IdentityKind::UnitId => 4,
@@ -783,12 +764,25 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 let matched =
                     usable_claims(&device.saved.descriptor, device.saved.identity_conflict)
                         .any(|(_, key)| incoming.iter().any(|(_, incoming)| *incoming == key));
-                (matched
-                    || routes(&device.saved).any(|key| key == &descriptor.key)
-                    || personality_match(&device.saved.descriptor, descriptor))
-                .then_some(index)
+                (matched || routes(&device.saved).any(|key| key == &descriptor.key))
+                    .then_some(index)
             })
             .collect();
+        // A weak observation can match several historical owners of a route.
+        // It must not arbitrate between their contradictory strong identities.
+        let conflicting_candidates: HashSet<_> = candidates
+            .iter()
+            .copied()
+            .filter(|&left| {
+                candidates.iter().any(|&right| {
+                    contradictory(
+                        &devices[left].saved.descriptor,
+                        &devices[right].saved.descriptor,
+                    )
+                })
+            })
+            .collect();
+        candidates.retain(|index| !conflicting_candidates.contains(index));
         let index = if candidates.is_empty() {
             let mut id = incoming
                 .iter()
@@ -929,27 +923,6 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         }
         let mut updated = descriptor.clone();
         updated.components = observed_components(observation);
-        if personality_match(&device.saved.descriptor, descriptor) {
-            let incoming_is_charging = descriptor
-                .identifiers
-                .iter()
-                .any(|id| id.namespace == "usb" && id.vendor == 0x413d && id.product == 0x2106);
-            if incoming_is_charging && !device.saved.descriptor.name.is_empty() {
-                updated.name = device.saved.descriptor.name.clone();
-            }
-            for prior_id in &device.saved.descriptor.identifiers {
-                if !updated.identifiers.contains(prior_id) {
-                    if prior_id.namespace == "usb"
-                        && prior_id.vendor == 0x413d
-                        && prior_id.product == 0x2104
-                    {
-                        updated.identifiers.insert(0, prior_id.clone());
-                    } else {
-                        updated.identifiers.push(prior_id.clone());
-                    }
-                }
-            }
-        }
         if already_seen {
             for role in &device.saved.descriptor.roles {
                 if !updated.roles.contains(role) {
@@ -986,7 +959,10 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 updated.identities.push(identity.clone());
             }
         }
-        if updated.name.is_empty() {
+        if updated.name.is_empty()
+            || (observation.connection != Connection::Connected
+                && !device.saved.descriptor.name.is_empty())
+        {
             updated.name = device.saved.descriptor.name.clone();
         }
         device.saved.descriptor = updated;

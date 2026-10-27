@@ -419,20 +419,26 @@ fn joined_sources_preserve_roles_and_uncertain_connection() {
 }
 
 #[test]
-fn docked_and_active_gamepad_personalities_merge_into_single_device() {
+fn idle_and_active_gamepad_on_the_same_port_keep_the_record() {
     let active = gamepad("port-1", 0x2104, "423bca92863cba8d");
     let mut first = model::merge_snapshot(&[], &snapshot(vec![active], &["windows.hid"])).devices;
     assert_eq!(first.len(), 1);
     assert!(first[0].saved.id.starts_with("identity:[\"usb:413d\""));
     first[0].saved.alias = "客厅手柄".into();
 
-    // Docked personality (2106, silent, no UID) on the same port:
+    // The idle endpoint is present but provides no controller connection proof.
     let docked = gamepad("port-1", 0x2106, "");
     let second = model::merge_snapshot(&first, &snapshot(vec![docked], &["windows.hid"])).devices;
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].saved.alias, "客厅手柄");
     assert!(second[0].present);
     assert_eq!(second[0].saved.id, first[0].saved.id);
+    assert_eq!(second[0].connection, Connection::Unknown);
+    assert_eq!(
+        second[0].saved.descriptor.name,
+        first[0].saved.descriptor.name
+    );
+    assert_eq!(second[0].saved.descriptor.identifiers[0].product, 0x2106);
     assert!(
         second[0]
             .saved
@@ -451,7 +457,7 @@ fn docked_and_active_gamepad_personalities_merge_into_single_device() {
 }
 
 #[test]
-fn earlier_docked_gamepad_promotes_id_when_uid_arrives() {
+fn earlier_idle_gamepad_promotes_id_when_uid_arrives() {
     let docked = gamepad("port-1", 0x2106, "");
     let mut first = model::merge_snapshot(&[], &snapshot(vec![docked], &["windows.hid"])).devices;
     assert_eq!(first.len(), 1);
@@ -473,49 +479,36 @@ fn earlier_docked_gamepad_promotes_id_when_uid_arrives() {
 }
 
 #[test]
-fn simultaneous_dongle_and_charging_cable_merge_into_single_gamepad() {
+fn simultaneous_gamepad_endpoints_without_shared_identity_stay_separate() {
     let active_dongle = gamepad("port-a", 0x2104, "423bca92863cba8d");
     let charging_dock = gamepad("port-b", 0x2106, "");
     let result = model::merge_snapshot(
         &[],
         &snapshot(vec![active_dongle, charging_dock], &["windows.hid"]),
     );
-    assert_eq!(result.devices.len(), 1);
-    assert!(result.devices[0].present);
-    assert!(
-        result.devices[0]
-            .saved
-            .id
-            .starts_with("identity:[\"usb:413d\"")
-    );
-    assert_eq!(
-        result.bindings.get(&periph_hal::DeviceKey {
-            backend: "windows.hid".into(),
-            local: "port-a".into(),
-        }),
-        Some(&result.devices[0].saved.id)
-    );
-    assert_eq!(
-        result.bindings.get(&periph_hal::DeviceKey {
-            backend: "windows.hid".into(),
-            local: "port-b".into(),
-        }),
-        Some(&result.devices[0].saved.id)
-    );
+    assert_eq!(result.devices.len(), 2);
+    assert!(result.devices.iter().all(|device| device.present));
+    let bound_ids: std::collections::BTreeSet<_> = result.bindings.values().collect();
+    assert_eq!(bound_ids.len(), 2);
+    assert!(result.merged_ids.is_empty());
 }
 
 #[test]
-fn cross_port_personality_switching_keeps_single_gamepad() {
+fn unidentified_gamepad_on_another_port_does_not_take_over_a_remark() {
     let active = gamepad("port-a", 0x2104, "423bca92863cba8d");
-    let first = model::merge_snapshot(&[], &snapshot(vec![active], &["windows.hid"])).devices;
+    let mut first = model::merge_snapshot(&[], &snapshot(vec![active], &["windows.hid"])).devices;
     assert_eq!(first.len(), 1);
+    first[0].saved.alias = "客厅手柄".into();
 
-    // Controller moved to charging cable on port-b:
+    // No evidence associates this idle endpoint with the previous controller.
     let docked = gamepad("port-b", 0x2106, "");
     let second = model::merge_snapshot(&first, &snapshot(vec![docked], &["windows.hid"])).devices;
-    assert_eq!(second.len(), 1);
-    assert!(second[0].present);
+    assert_eq!(second.len(), 2);
+    assert!(!second[0].present);
     assert_eq!(second[0].saved.id, first[0].saved.id);
+    assert_eq!(second[0].saved.alias, "客厅手柄");
+    assert!(second[1].present);
+    assert!(second[1].saved.alias.is_empty());
 }
 
 #[test]
@@ -525,4 +518,139 @@ fn different_gamepads_with_distinct_uids_stay_separate() {
     let result = model::merge_snapshot(&[], &snapshot(vec![first, second], &["windows.hid"]));
     assert_eq!(result.devices.len(), 2);
     assert_ne!(result.devices[0].saved.id, result.devices[1].saved.id);
+}
+
+#[test]
+fn idle_gamepad_endpoints_on_different_ports_stay_separate() {
+    let result = model::merge_snapshot(
+        &[],
+        &snapshot(
+            vec![gamepad("port-a", 0x2106, ""), gamepad("port-b", 0x2106, "")],
+            &["windows.hid"],
+        ),
+    );
+    assert_eq!(result.devices.len(), 2);
+    assert!(result.merged_ids.is_empty());
+}
+
+#[test]
+fn idle_endpoint_cannot_bridge_distinct_uids_in_any_enumeration_order() {
+    let observations = [
+        gamepad("port-a", 0x2104, "423bca92863cba8d"),
+        gamepad("port-b", 0x2104, "aabbccddeeff0011"),
+        gamepad("port-c", 0x2106, ""),
+    ];
+    let expected = model::merge_snapshot(&[], &snapshot(observations.to_vec(), &["windows.hid"]));
+    assert_eq!(expected.devices.len(), 3);
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let scan = snapshot(
+            order.map(|index| observations[index].clone()).to_vec(),
+            &["windows.hid"],
+        );
+        let result = model::merge_snapshot(&[], &scan);
+        assert_eq!(result.devices.len(), 3, "order={order:?}");
+        assert_eq!(result.bindings, expected.bindings, "order={order:?}");
+        assert!(result.merged_ids.is_empty());
+        let repeated = model::merge_snapshot(&result.devices, &scan);
+        assert_eq!(repeated.bindings, result.bindings);
+        assert_eq!(repeated.devices.len(), 3);
+    }
+}
+
+#[test]
+fn shared_uuid_joins_wired_and_wireless_endpoints_and_follows_ports() {
+    let uid = "423bca92863cba8d";
+    for reverse in [false, true] {
+        let mut observations = vec![
+            gamepad("port-a", 0x2104, uid),
+            gamepad("port-b", 0x2114, uid),
+        ];
+        if reverse {
+            observations.reverse();
+        }
+        let mut first = model::merge_snapshot(&[], &snapshot(observations, &["windows.hid"]));
+        assert_eq!(first.devices.len(), 1);
+        assert_eq!(first.devices[0].saved.routes.len(), 2);
+        first.devices[0].saved.alias = "客厅手柄".into();
+        let second = model::merge_snapshot(
+            &first.devices,
+            &snapshot(vec![gamepad("port-c", 0x2114, uid)], &["windows.hid"]),
+        );
+        assert_eq!(second.devices.len(), 1);
+        assert_eq!(second.devices[0].saved.id, first.devices[0].saved.id);
+        assert_eq!(second.devices[0].saved.alias, "客厅手柄");
+    }
+}
+
+#[test]
+fn weak_observation_does_not_choose_between_conflicting_historical_route_owners() {
+    let first = model::merge_snapshot(
+        &[],
+        &snapshot(vec![device("one", "shared", "A", "")], &["one"]),
+    );
+    let second = model::merge_snapshot(
+        &first.devices,
+        &snapshot(vec![device("one", "shared", "B", "")], &["one"]),
+    );
+    assert_eq!(second.devices.len(), 2);
+    let mut previous = second.devices;
+    previous[0].saved.alias = "A 的备注".into();
+    previous[1].saved.alias = "B 的备注".into();
+    let mut weak = device("one", "shared", "", "");
+    weak.connection = Connection::Unknown;
+    let scan = snapshot(vec![weak], &["one"]);
+    let ambiguous = model::merge_snapshot(&previous, &scan);
+    assert_eq!(ambiguous.devices.len(), 3);
+    assert!(ambiguous.merged_ids.is_empty());
+    let weak_id = ambiguous.bindings.values().next().unwrap();
+    assert!(
+        ambiguous
+            .devices
+            .iter()
+            .find(|device| &device.saved.id == weak_id)
+            .unwrap()
+            .saved
+            .alias
+            .is_empty()
+    );
+
+    let saved: Vec<_> = ambiguous
+        .devices
+        .iter()
+        .map(|device| device.saved.clone())
+        .collect();
+    let repeated = model::merge_snapshot(&model::restore(&saved), &scan);
+    assert_eq!(repeated.devices.len(), 3);
+    assert_eq!(repeated.bindings, ambiguous.bindings);
+    assert!(repeated.merged_ids.is_empty());
+
+    // Strong evidence can resolve the temporary route record later.
+    let resolved = model::merge_snapshot(
+        &repeated.devices,
+        &snapshot(vec![device("one", "shared", "A", "")], &["one"]),
+    );
+    assert_eq!(resolved.devices.len(), 2);
+    assert!(
+        resolved
+            .devices
+            .iter()
+            .any(|device| device.saved.alias == "A 的备注")
+    );
+    assert!(
+        resolved
+            .devices
+            .iter()
+            .any(|device| device.saved.alias == "B 的备注")
+    );
+    assert_eq!(
+        resolved.merged_ids,
+        vec![(weak_id.clone(), previous[0].saved.id.clone())]
+    );
 }

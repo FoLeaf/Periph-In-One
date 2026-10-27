@@ -4,7 +4,88 @@ use periph_hal::{
     battery::{BatteryState, SampleOrigin},
 };
 use periph_in_one::{battery::Batteries, hardware};
-use support::{battery, device, snapshot};
+use support::{battery, device, gamepad, snapshot};
+
+#[test]
+fn idle_gamepad_observation_preserves_independent_battery_histories() {
+    let mut power = Batteries::default();
+    let mut a = gamepad("port-a", 0x2104, "423bca92863cba8d");
+    let mut b = gamepad("port-b", 0x2104, "aabbccddeeff0011");
+    battery(&mut a, "main", Some(30));
+    battery(&mut b, "main", Some(80));
+    let previous = hardware::merge_report(
+        &[],
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![a, b], &["windows.hid"])),
+        10,
+    );
+    let mut idle = gamepad("port-c", 0x2106, "");
+    battery(&mut idle, "main", None);
+    let current = hardware::merge_report(
+        &previous,
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![idle], &["windows.hid"])),
+        20,
+    );
+    assert_eq!(current.len(), 3);
+    assert_eq!(power.saved.len(), 2);
+    for (old, expected) in previous.iter().zip([30, 80]) {
+        let view = power.view(&old.saved.id, "main");
+        assert_eq!(view.level, Some(expected));
+        assert_eq!(view.observed_at, Some(10));
+        assert!(!view.current);
+    }
+}
+
+#[test]
+fn sleeping_and_waking_on_the_same_port_keep_remark_and_battery_age() {
+    let mut power = Batteries::default();
+    let mut active = gamepad("port-a", 0x2104, "423bca92863cba8d");
+    battery(&mut active, "main", Some(80));
+    let mut first = hardware::merge_report(
+        &[],
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![active], &["windows.hid"])),
+        10,
+    );
+    first[0].saved.alias = "客厅手柄".into();
+    let id = first[0].saved.id.clone();
+    let mut idle = gamepad("port-a", 0x2106, "");
+    battery(&mut idle, "main", None);
+    let sleeping = hardware::merge_report(
+        &first,
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![idle], &["windows.hid"])),
+        20,
+    );
+    assert_eq!(sleeping.len(), 1);
+    assert_eq!(sleeping[0].saved.id, id);
+    assert_eq!(sleeping[0].connection, Connection::Unknown);
+    assert_eq!(sleeping[0].saved.alias, "客厅手柄");
+    assert_eq!(periph_in_one::presentation::status(&sleeping[0]), "未响应");
+    let historical = power.view(&id, "main");
+    assert_eq!(historical.level, Some(80));
+    assert_eq!(historical.observed_at, Some(10));
+    assert!(!historical.current);
+
+    let mut awake = gamepad("port-a", 0x2104, "423bca92863cba8d");
+    battery(&mut awake, "main", Some(75));
+    let resumed = hardware::merge_report(
+        &sleeping,
+        &mut power,
+        hardware::from_snapshot(snapshot(vec![awake], &["windows.hid"])),
+        30,
+    );
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].saved.id, id);
+    assert_eq!(resumed[0].saved.alias, "客厅手柄");
+    assert_eq!(resumed[0].connection, Connection::Connected);
+    let current = power.view(&id, "main");
+    assert_eq!(current.level, Some(75));
+    assert_eq!(current.observed_at, Some(30));
+    assert!(current.current);
+    assert_eq!(power.saved.len(), 1);
+}
 
 #[test]
 fn missing_reading_does_not_refresh_history_or_change_connection() {

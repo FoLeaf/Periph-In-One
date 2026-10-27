@@ -84,7 +84,11 @@ pub fn gamepad(route: &str, pid: u16, uid: &str) -> Device {
             }],
             ..DeviceDescriptor::default()
         },
-        connection: Connection::Connected,
+        connection: if pid == 0x2106 {
+            Connection::Unknown
+        } else {
+            Connection::Connected
+        },
         capabilities: Capabilities::default(),
         issue: None,
     }
