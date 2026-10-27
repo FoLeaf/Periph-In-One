@@ -20,13 +20,20 @@ pub(crate) fn open_pair(
     api: &HidApi,
     info: &DeviceInfo,
 ) -> Result<(HidDevice, HidDevice), HardwareError> {
+    open_pair_path(api, info.path())
+}
+
+pub(crate) fn open_pair_path(
+    api: &HidApi,
+    path: &std::ffi::CStr,
+) -> Result<(HidDevice, HidDevice), HardwareError> {
     // Keep input on an independent overlapped handle; never mix an outstanding
     // read with writes/IOCTL on the same handle.
     let reader = api
-        .open_path(info.path())
+        .open_path(path)
         .map_err(HardwareError::transport)?;
     let writer = api
-        .open_path(info.path())
+        .open_path(path)
         .map_err(HardwareError::transport)?;
     Ok((reader, writer))
 }

@@ -295,6 +295,7 @@ pub fn discovery_report() -> Result<DiscoveryReport, HardwareError> {
                     })
                 }),
             )?;
+            adapter.populate_capabilities(info, outcome.slot, lock.clone(), &mut capabilities);
             report.devices.push(Device {
                 descriptor: description,
                 connection: outcome.connection,

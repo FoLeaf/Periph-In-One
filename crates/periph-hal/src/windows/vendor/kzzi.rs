@@ -8,12 +8,16 @@
 
 use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
+    lighting::{Lighting, LightingController},
     protocol,
     vendor::{Outcome, VendorAdapter},
     windows::transport::KzziLink,
 };
 use hidapi::{DeviceInfo, HidApi};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 pub struct KzziKeyboard;
 
@@ -64,6 +68,111 @@ impl VendorAdapter for KzziKeyboard {
             Err(error) => vec![Outcome::failure(error)],
         }
     }
+
+    fn populate_capabilities(
+        &self,
+        info: &DeviceInfo,
+        _slot: Option<u8>,
+        lock: Arc<Mutex<()>>,
+        capabilities: &mut crate::Capabilities,
+    ) {
+        let path = info.path().to_string_lossy().to_string();
+        let controller = KzziLightingController { path, lock };
+        let _ = capabilities.insert("main", Lighting::new(controller));
+    }
+}
+
+struct KzziLightingController {
+    path: String,
+    lock: Arc<Mutex<()>>,
+}
+
+impl LightingController for KzziLightingController {
+    fn read_state(&self) -> Result<bool, HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "keyboard session lock poisoned")
+        })?;
+        let link = KzziLink::open(&self.path)?;
+        read_lighting_state(&link)
+    }
+
+    fn set_state(&self, on: bool) -> Result<(), HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "keyboard session lock poisoned")
+        })?;
+        let link = KzziLink::open(&self.path)?;
+        set_lighting_state(&link, on)
+    }
+}
+
+fn read_lighting_state(link: &KzziLink) -> Result<bool, HardwareError> {
+    let profile = read_profile(link)?;
+    Ok(protocol::kzzi_profile_is_lit(&profile))
+}
+
+fn set_lighting_state(link: &KzziLink, on: bool) -> Result<(), HardwareError> {
+    let original = read_profile(link).unwrap_or_else(|_| {
+        let mut def = [0u8; 128];
+        def[126] = 0x5a;
+        def[127] = 0xa5;
+        def
+    });
+    let modified = protocol::kzzi_create_lighting_profile(&original, on);
+    let frames = protocol::kzzi_split_lighting_profile(&modified);
+    let mut buffer = [0u8; 64];
+    for frame in &frames {
+        link.drain();
+        link.send(frame)?;
+        let _ = link.read(&mut buffer, Duration::from_millis(50));
+    }
+    link.drain();
+    link.send(&protocol::kzzi_save_lighting_request())?;
+    std::thread::sleep(Duration::from_millis(80));
+
+    let readback = read_profile(link)?;
+    if protocol::kzzi_profile_is_lit(&readback) == on {
+        Ok(())
+    } else {
+        Err(HardwareError::new(
+            ErrorKind::InvalidResponse,
+            "lighting readback mismatch",
+        ))
+    }
+}
+
+fn read_profile(link: &KzziLink) -> Result<[u8; 128], HardwareError> {
+    let mut pages = [[0u8; 20]; 10];
+    let mut buffer = [0u8; 64];
+    for _ in 0..3 {
+        link.drain();
+        link.send(&protocol::kzzi_lighting_read_request())?;
+        let end = Instant::now() + Duration::from_millis(1200);
+        let mut count = 0;
+        let mut collected = [false; 10];
+        while Instant::now() < end && count < 10 {
+            if let Some(n) = link.read(&mut buffer, Duration::from_millis(100)) {
+                if n >= 20
+                    && protocol::kzzi_frame_ok(&buffer[..20])
+                    && (buffer[1] == 0x44 || buffer[1] == 0x04)
+                    && buffer[2] == 10
+                {
+                    let seq = buffer[3] as usize;
+                    if seq < 10 && !collected[seq] {
+                        pages[seq].copy_from_slice(&buffer[..20]);
+                        collected[seq] = true;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count == 10 && let Some(profile) = protocol::kzzi_parse_lighting_profile(&pages) {
+            return Ok(profile);
+        }
+    }
+    Err(HardwareError::new(
+        ErrorKind::Timeout,
+        "kzzi lighting profile read timed out",
+    ))
 }
 
 fn identify(link: &KzziLink) -> Result<(String, bool), HardwareError> {

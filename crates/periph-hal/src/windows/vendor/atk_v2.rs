@@ -4,13 +4,18 @@
 //! frames follow the reviewed ATK HUB JavaScript and are not yet verified on
 //! live hardware.
 
-use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
+    Connection, ErrorKind, HardwareError,
+    dpi::{Dpi, DpiController},
     protocol,
     vendor::{Outcome, VendorAdapter},
-    windows::transport::{drain, open_pair},
+    windows::transport::{drain, open_pair, open_pair_path},
 };
-use hidapi::{DeviceInfo, HidApi};
+use hidapi::{DeviceInfo, HidApi, HidDevice};
+use std::{
+    ffi::CString,
+    sync::{Arc, Mutex},
+};
 
 /// V2 mice on the ATK VID (filter-3fyXcGGg.js, review-verified 2026-10-25).
 const PIDS_373B: [u16; 179] = [
@@ -61,6 +66,90 @@ impl VendorAdapter for AtkV2Mouse {
             },
             Err(error) => Outcome::failure(error),
         }
+    }
+
+    fn populate_capabilities(
+        &self,
+        info: &DeviceInfo,
+        _slot: Option<u8>,
+        lock: Arc<Mutex<()>>,
+        capabilities: &mut crate::Capabilities,
+    ) {
+        let path = info.path().to_owned();
+        let controller = V2MouseDpiController { path, lock };
+        let _ = capabilities.insert("main", Dpi::new(vec![400, 800, 1200, 1600], controller));
+    }
+}
+
+struct V2MouseDpiController {
+    path: CString,
+    lock: Arc<Mutex<()>>,
+}
+
+impl DpiController for V2MouseDpiController {
+    fn read_stage(&self) -> Result<Option<u8>, HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "mouse session lock poisoned")
+        })?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let (reader, writer) = open_pair_path(&api, &self.path)?;
+        read_current_dpi(&reader, &writer)
+    }
+
+    fn set_stage(&self, stage: u8) -> Result<(), HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "mouse session lock poisoned")
+        })?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let (reader, writer) = open_pair_path(&api, &self.path)?;
+        set_current_dpi(&reader, &writer, stage)
+    }
+}
+
+fn read_current_dpi(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>, HardwareError> {
+    let mut buffer = [0u8; 17];
+    for _ in 0..3 {
+        drain(reader);
+        writer
+            .send_feature_report(&protocol::atk_v2_current_dpi_request())
+            .map_err(HardwareError::transport)?;
+        buffer[0] = 8;
+        if let Ok(n) = reader.get_feature_report(&mut buffer)
+            && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n])
+        {
+            return Ok(Some(stage));
+        }
+    }
+    Ok(None)
+}
+
+fn set_current_dpi(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
+    let mut buffer = [0u8; 17];
+    let mut written = false;
+    for _ in 0..3 {
+        drain(reader);
+        writer
+            .send_feature_report(&protocol::atk_v2_set_current_dpi_request(stage))
+            .map_err(HardwareError::transport)?;
+        buffer[0] = 8;
+        if let Ok(n) = reader.get_feature_report(&mut buffer)
+            && protocol::atk_v2_set_eeprom_ok(&buffer[..n], 4)
+        {
+            written = true;
+            break;
+        }
+    }
+    if !written {
+        return Err(HardwareError::new(ErrorKind::Timeout, "mouse set dpi did not respond"));
+    }
+    let active = read_current_dpi(reader, writer)?;
+    if active == Some(stage) {
+        Ok(())
+    } else {
+        Err(HardwareError::new(
+            ErrorKind::InvalidResponse,
+            "dpi readback verification failed",
+        ))
     }
 }
 

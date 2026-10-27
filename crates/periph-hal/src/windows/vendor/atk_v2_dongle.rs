@@ -3,12 +3,18 @@
 //! writes. Contributor-verified on 3554:F58E (VXE R1 SE+ 1K dongle).
 
 use crate::{
-    Connection, ErrorKind, HardwareError, protocol,
+    Connection, ErrorKind, HardwareError,
+    dpi::{Dpi, DpiController},
+    protocol,
     vendor::{Outcome, VendorAdapter},
-    windows::transport::{drain, open_pair, send},
+    windows::transport::{drain, open_pair, open_pair_path, send},
 };
 use hidapi::{DeviceInfo, HidApi, HidDevice};
-use std::time::{Duration, Instant};
+use std::{
+    ffi::CString,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 // ATK V HUB 2.3.47 receiver entries; only F58E is live-verified.
 const RECEIVER_PIDS: [u16; 9] = [
@@ -35,6 +41,95 @@ impl VendorAdapter for AtkV2Dongle {
 
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
         probe(api, info, true).unwrap_or_else(Outcome::failure)
+    }
+
+    fn populate_capabilities(
+        &self,
+        info: &DeviceInfo,
+        _slot: Option<u8>,
+        lock: Arc<Mutex<()>>,
+        capabilities: &mut crate::Capabilities,
+    ) {
+        let path = info.path().to_owned();
+        let controller = DongleDpiController { path, lock };
+        let _ = capabilities.insert("main", Dpi::new(vec![400, 800, 1200, 1600], controller));
+    }
+}
+
+struct DongleDpiController {
+    path: CString,
+    lock: Arc<Mutex<()>>,
+}
+
+impl DpiController for DongleDpiController {
+    fn read_stage(&self) -> Result<Option<u8>, HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "receiver session lock poisoned")
+        })?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let (reader, writer) = open_pair_path(&api, &self.path)?;
+        read_current_dpi(&reader, &writer)
+    }
+
+    fn set_stage(&self, stage: u8) -> Result<(), HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "receiver session lock poisoned")
+        })?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let (reader, writer) = open_pair_path(&api, &self.path)?;
+        set_current_dpi(&reader, &writer, stage)
+    }
+}
+
+fn read_current_dpi(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>, HardwareError> {
+    let mut buffer = [0u8; 17];
+    for _ in 0..3 {
+        drain(reader);
+        send(writer, &protocol::atk_v2_current_dpi_request())?;
+        let end = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < end {
+            let n = reader
+                .read_timeout(&mut buffer, 120)
+                .map_err(HardwareError::transport)?;
+            if n > 0 && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n]) {
+                return Ok(Some(stage));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn set_current_dpi(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
+    let mut buffer = [0u8; 17];
+    let mut written = false;
+    for _ in 0..3 {
+        drain(reader);
+        send(writer, &protocol::atk_v2_set_current_dpi_request(stage))?;
+        let end = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < end {
+            let n = reader
+                .read_timeout(&mut buffer, 120)
+                .map_err(HardwareError::transport)?;
+            if n > 0 && protocol::atk_v2_set_eeprom_ok(&buffer[..n], 4) {
+                written = true;
+                break;
+            }
+        }
+        if written {
+            break;
+        }
+    }
+    if !written {
+        return Err(HardwareError::new(ErrorKind::Timeout, "mouse set dpi did not respond"));
+    }
+    let active = read_current_dpi(reader, writer)?;
+    if active == Some(stage) {
+        Ok(())
+    } else {
+        Err(HardwareError::new(
+            ErrorKind::InvalidResponse,
+            "dpi readback verification failed",
+        ))
     }
 }
 

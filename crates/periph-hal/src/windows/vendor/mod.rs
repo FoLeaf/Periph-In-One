@@ -57,6 +57,14 @@ pub trait VendorAdapter {
     fn read_all(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
         vec![self.read(api, info)]
     }
+    fn populate_capabilities(
+        &self,
+        _info: &DeviceInfo,
+        _slot: Option<u8>,
+        _lock: std::sync::Arc<std::sync::Mutex<()>>,
+        _capabilities: &mut crate::Capabilities,
+    ) {
+    }
 }
 
 pub const ADAPTERS: &[&dyn VendorAdapter] = &[
