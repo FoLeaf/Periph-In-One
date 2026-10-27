@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "periph-in-one"
-version = "0.23.1"
+version = "0.23.2"
 edition = "2024"
 description = "A portable Windows peripheral battery monitor"
 license = "MIT"
