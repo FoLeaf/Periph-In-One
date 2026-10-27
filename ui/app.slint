@@ -19,6 +19,62 @@ export struct DeviceRow {
     updated: string,
     alias: string,
     identity-note: string,
+    has-dpi: bool,
+    dpi-stage: int,
+    dpi-pending: bool,
+    has-lighting: bool,
+    lighting-on: bool,
+    lighting-pending: bool,
+}
+
+component DpiButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    in property <bool> disabled;
+    callback clicked();
+    border-radius: 6px;
+    background: root.active ? #18181b : (touch.has-hover && !root.disabled ? #e4e4e9 : #f0f0f3);
+    Text {
+        text: root.text;
+        font-size: 10px;
+        font-weight: root.active ? 600 : 500;
+        color: root.active ? #ffffff : (root.disabled ? #a0a0a8 : #27272a);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: root.disabled ? default : pointer;
+        clicked => {
+            if !root.disabled {
+                root.clicked();
+            }
+        }
+    }
+}
+
+component LightButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    in property <bool> disabled;
+    callback clicked();
+    border-radius: 6px;
+    background: root.active ? #18181b : (touch.has-hover && !root.disabled ? #e4e4e9 : #f0f0f3);
+    Text {
+        text: root.text;
+        font-size: 11px;
+        font-weight: root.active ? 600 : 500;
+        color: root.active ? #ffffff : (root.disabled ? #a0a0a8 : #27272a);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: root.disabled ? default : pointer;
+        clicked => {
+            if !root.disabled {
+                root.clicked();
+            }
+        }
+    }
 }
 
 component IconButton inherits Rectangle {
@@ -41,7 +97,9 @@ component DeviceCard inherits Rectangle {
     private property <bool> show-hardware-name: root.data.alias != "" && root.data.alias != root.data.hardware-name;
     callback edit();
     callback delete-device();
-    height: 208px;
+    callback set-dpi(int);
+    callback toggle-lighting(bool);
+    height: 240px;
     border-radius: 16px;
     border-width: 1px;
     border-color: data.present ? #e2e3e7 : #e1e2e6;
@@ -73,9 +131,24 @@ component DeviceCard inherits Rectangle {
         x: 18px; y: 125px; width: parent.width - 36px; height: 5px; border-radius: 3px; background: #e5e5e9;
         Rectangle { x: 0px; y: 0px; width: parent.width * root.data.level; height: parent.height; border-radius: 3px; background: !root.data.fresh || !root.data.has-battery ? #c5c5cc : root.data.level < 0.3 ? #e47e35 : #27272a; }
     }
-    if root.show-hardware-name: Text { x: 18px; y: 140px; width: parent.width - 36px; height: 17px; text: root.data.hardware-name; color: #6c6c74; font-size: 11px; overflow: elide; }
-    Text { x: 18px; y: root.show-hardware-name ? 162px : 143px; width: parent.width - 36px; height: 17px; text: root.data.hardware-id; color: #7a7a82; font-size: 10px; overflow: elide; }
-    Text { x: 18px; y: root.show-hardware-name ? 185px : 171px; width: parent.width - 36px; height: 14px; text: root.data.updated; color: #8c8c94; font-size: 10px; overflow: elide; }
+
+    if root.data.has-dpi: HorizontalLayout {
+        x: 18px; y: 138px; width: parent.width - 36px; height: 24px; spacing: 6px;
+        DpiButton { text: "400"; active: root.data.dpi-stage == 1; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(1); } }
+        DpiButton { text: "800"; active: root.data.dpi-stage == 2; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(2); } }
+        DpiButton { text: "1200"; active: root.data.dpi-stage == 3; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(3); } }
+        DpiButton { text: "1600"; active: root.data.dpi-stage == 4; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(4); } }
+    }
+    if root.data.has-lighting: HorizontalLayout {
+        x: 18px; y: 138px; width: min(parent.width - 36px, 140px); height: 24px; spacing: 6px;
+        Text { text: "灯光"; font-size: 11px; color: root.data.present ? #5a5a62 : #929299; vertical-alignment: center; min-width: 28px; }
+        LightButton { text: "开"; active: root.data.lighting-on; disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending; clicked => { root.toggle-lighting(true); } }
+        LightButton { text: "关"; active: !root.data.lighting-on; disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending; clicked => { root.toggle-lighting(false); } }
+    }
+
+    if root.show-hardware-name: Text { x: 18px; y: 172px; width: parent.width - 36px; height: 16px; text: root.data.hardware-name; color: #6c6c74; font-size: 11px; overflow: elide; }
+    Text { x: 18px; y: root.show-hardware-name ? 192px : 175px; width: parent.width - 36px; height: 16px; text: root.data.hardware-id; color: #7a7a82; font-size: 10px; overflow: elide; }
+    Text { x: 18px; y: root.show-hardware-name ? 214px : 198px; width: parent.width - 36px; height: 14px; text: root.data.updated; color: #8c8c94; font-size: 10px; overflow: elide; }
 }
 
 component MiniPanel inherits Rectangle {
@@ -202,6 +275,8 @@ export component AppWindow inherits Window {
     callback download-update();
     callback restart-update();
     callback open-release();
+    callback set-dpi(string, int);
+    callback toggle-lighting(string, bool);
 
     if root.mini-mode: MiniPanel {
         width: 100%;
@@ -229,11 +304,11 @@ export component AppWindow inherits Window {
         ScrollView {
             x: 18px; y: 90px; width: parent.width - 36px; height: parent.height - 150px;
             viewport-width: self.visible-width;
-            viewport-height: max(self.visible-height, ceil(root.devices.length / root.columns) * 220px);
+            viewport-height: max(self.visible-height, ceil(root.devices.length / root.columns) * 252px);
             for data[index] in root.devices: DeviceCard {
                 width: (parent.width - (root.columns - 1) * 12px) / root.columns;
                 x: mod(index, root.columns) * (self.width + 12px);
-                y: floor(index / root.columns) * 220px;
+                y: floor(index / root.columns) * 252px;
                 data: data;
                 edit => { root.edit-device(data.id); }
                 delete-device => {
@@ -243,9 +318,11 @@ export component AppWindow inherits Window {
                     root.editing = false;
                     root.deleting = true;
                 }
+                set-dpi(stage) => { root.set-dpi(data.id, stage); }
+                toggle-lighting(on) => { root.toggle-lighting(data.id, on); }
             }
             if root.devices.length == 0: Rectangle {
-                width: parent.width; height: 220px;
+                width: parent.width; height: 240px;
                 border-radius: 16px; border-width: 1px; border-color: #dfdfe5; background: #ffffff;
                 Image { x: (parent.width - 48px) / 2; y: 40px; width: 48px; height: 48px; source: @image-url("../assets/brand.svg"); }
                 Text { x: 16px; y: 106px; width: parent.width - 32px; height: 24px; text: root.busy ? "正在寻找设备…" : "还没有发现设备"; horizontal-alignment: center; font-size: 16px; font-weight: 600; color: #303035; }

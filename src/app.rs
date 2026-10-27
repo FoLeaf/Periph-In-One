@@ -44,6 +44,10 @@ pub enum Action {
     Delete(String),
     Saved(u64, Result<(), String>),
     Autostart(bool),
+    SetDpi(String, u8),
+    DpiResult(String, Result<u8, String>),
+    ToggleLighting(String, bool),
+    LightingResult(String, Result<bool, String>),
     Update(UpdateEvent),
     AutomaticUpdate(bool),
     DownloadUpdate,
@@ -347,6 +351,14 @@ impl App {
                     .into(),
                     alias: saved.alias.clone().into(),
                     identity_note: identity_note(device).into(),
+                    has_dpi: device.dpi.is_some()
+                        || (device.saved.last_dpi_stage.is_some() && !device.present),
+                    dpi_stage: device.current_dpi_stage.unwrap_or(0) as i32,
+                    dpi_pending: device.dpi_pending,
+                    has_lighting: device.lighting.is_some()
+                        || (device.saved.last_lighting_on.is_some() && !device.present),
+                    lighting_on: device.current_lighting_on.unwrap_or(false),
+                    lighting_pending: device.lighting_pending,
                 }
             })
             .collect();
@@ -656,6 +668,80 @@ impl App {
                     Err(_) => self.notice("无法修改开机启动，请稍后重试"),
                 }
                 self.ui.set_autostart(platform::autostart_enabled());
+            }
+            Action::SetDpi(id, stage) => {
+                let Some(device) = self.devices.iter_mut().find(|d| d.saved.id == id) else {
+                    return;
+                };
+                if !device.present || device.connection != periph_hal::Connection::Connected {
+                    return;
+                }
+                let Some(dpi) = device.dpi.clone() else {
+                    return;
+                };
+                device.dpi_pending = true;
+                self.update();
+                let target_id = id.clone();
+                thread::Builder::new()
+                    .name("dpi-control".into())
+                    .spawn(move || {
+                        let result = dpi.set_stage(stage).map(|_| stage).map_err(|e| e.to_string());
+                        post(Action::DpiResult(target_id, result));
+                    })
+                    .ok();
+            }
+            Action::DpiResult(id, result) => {
+                if let Some(device) = self.devices.iter_mut().find(|d| d.saved.id == id) {
+                    device.dpi_pending = false;
+                    match result {
+                        Ok(stage) => {
+                            device.current_dpi_stage = Some(stage);
+                            device.saved.last_dpi_stage = Some(stage);
+                            self.persist("");
+                        }
+                        Err(error) => {
+                            self.notice(error);
+                        }
+                    }
+                    self.update();
+                }
+            }
+            Action::ToggleLighting(id, on) => {
+                let Some(device) = self.devices.iter_mut().find(|d| d.saved.id == id) else {
+                    return;
+                };
+                if !device.present || device.connection != periph_hal::Connection::Connected {
+                    return;
+                }
+                let Some(lighting) = device.lighting.clone() else {
+                    return;
+                };
+                device.lighting_pending = true;
+                self.update();
+                let target_id = id.clone();
+                thread::Builder::new()
+                    .name("lighting-control".into())
+                    .spawn(move || {
+                        let result = lighting.set_state(on).map(|_| on).map_err(|e| e.to_string());
+                        post(Action::LightingResult(target_id, result));
+                    })
+                    .ok();
+            }
+            Action::LightingResult(id, result) => {
+                if let Some(device) = self.devices.iter_mut().find(|d| d.saved.id == id) {
+                    device.lighting_pending = false;
+                    match result {
+                        Ok(on) => {
+                            device.current_lighting_on = Some(on);
+                            device.saved.last_lighting_on = Some(on);
+                            self.persist("");
+                        }
+                        Err(error) => {
+                            self.notice(error);
+                        }
+                    }
+                    self.update();
+                }
             }
             Action::Update(event) => match event {
                 UpdateEvent::Status {
@@ -967,6 +1053,8 @@ pub fn run() -> Result<(), String> {
     ui.on_delete_device(|id| post(Action::Delete(id.into())));
     ui.on_toggle_autostart(|enabled| post(Action::Autostart(enabled)));
     ui.on_toggle_update(|enabled| post(Action::AutomaticUpdate(enabled)));
+    ui.on_set_dpi(|id, stage| post(Action::SetDpi(id.into(), stage as u8)));
+    ui.on_toggle_lighting(|id, on| post(Action::ToggleLighting(id.into(), on)));
     ui.on_download_update(|| post(Action::DownloadUpdate));
     ui.on_restart_update(|| post(Action::InstallUpdate));
     ui.on_open_release(|| post(Action::ReleasePage));

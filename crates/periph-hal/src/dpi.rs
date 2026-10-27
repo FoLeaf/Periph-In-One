@@ -30,6 +30,14 @@ pub struct Dpi {
     executor: Option<Arc<dyn BackendExecutor>>,
 }
 
+impl std::fmt::Debug for Dpi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dpi")
+            .field("stages", &self.stages)
+            .finish()
+    }
+}
+
 impl Dpi {
     pub fn new(stages: Vec<u32>, controller: impl DpiController + 'static) -> Self {
         Self {

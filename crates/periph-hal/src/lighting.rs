@@ -28,6 +28,12 @@ pub struct Lighting {
     executor: Option<Arc<dyn BackendExecutor>>,
 }
 
+impl std::fmt::Debug for Lighting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lighting").finish()
+    }
+}
+
 impl Lighting {
     pub fn new(controller: impl LightingController + 'static) -> Self {
         Self {

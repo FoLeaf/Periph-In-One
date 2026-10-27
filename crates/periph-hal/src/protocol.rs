@@ -396,10 +396,10 @@ pub fn kzzi_create_lighting_profile(original: &[u8; 128], enable: bool) -> [u8; 
 /// Split 128-byte profile into 10 chunked frames for writing (command 0x04, subcommand 10).
 pub fn kzzi_split_lighting_profile(profile: &[u8; 128]) -> [[u8; 20]; 10] {
     let mut frames = [[0u8; 20]; 10];
-    for seq in 0..10 {
+    for (seq, frame) in frames.iter_mut().enumerate() {
         let start = seq * 14;
         let end = (start + 14).min(128);
-        frames[seq] = kzzi_chunk_frame(0x04, 10, seq as u8, &profile[start..end]);
+        *frame = kzzi_chunk_frame(0x04, 10, seq as u8, &profile[start..end]);
     }
     frames
 }

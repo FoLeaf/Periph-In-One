@@ -14,10 +14,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ScanReport {
     pub snapshot: Snapshot,
     pub batteries: Vec<Observation>,
+    pub dpi_stages: Vec<(periph_hal::DeviceKey, Option<u8>)>,
+    pub lighting_states: Vec<(periph_hal::DeviceKey, bool)>,
 }
 
 fn record_capability_failure(
@@ -52,6 +54,8 @@ pub struct RefreshSession<'a> {
     snapshot: Snapshot,
     observations: Vec<Observation>,
     pending: Vec<PendingBattery>,
+    dpi_stages: Vec<(periph_hal::DeviceKey, Option<u8>)>,
+    lighting_states: Vec<(periph_hal::DeviceKey, bool)>,
     deadline: Instant,
     cancelled: &'a AtomicBool,
     done: bool,
@@ -65,6 +69,8 @@ impl<'a> RefreshSession<'a> {
             snapshot: Snapshot::default(),
             observations: Vec::new(),
             pending: Vec::new(),
+            dpi_stages: Vec::new(),
+            lighting_states: Vec::new(),
             deadline: Instant::now() + timeout,
             cancelled,
             done: false,
@@ -142,6 +148,8 @@ impl<'a> RefreshSession<'a> {
         changed.then(|| ScanReport {
             snapshot: self.snapshot.clone(),
             batteries: self.observations.clone(),
+            dpi_stages: self.dpi_stages.clone(),
+            lighting_states: self.lighting_states.clone(),
         })
     }
 
@@ -159,6 +167,21 @@ impl<'a> RefreshSession<'a> {
                 }
                 for device_index in first..self.snapshot.devices.len() {
                     self.queue_batteries(device_index);
+                }
+                for device in &self.snapshot.devices[first..] {
+                    if device.connection == periph_hal::Connection::Connected {
+                        if let Some(dpi) = device.capabilities.get::<periph_hal::dpi::Dpi>("main")
+                            && let Ok(stage) = dpi.read_stage()
+                        {
+                            self.dpi_stages.push((device.descriptor.key.clone(), stage));
+                        }
+                        if let Some(lighting) =
+                            device.capabilities.get::<periph_hal::lighting::Lighting>("main")
+                            && let Ok(on) = lighting.read_state()
+                        {
+                            self.lighting_states.push((device.descriptor.key.clone(), on));
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -312,9 +335,28 @@ fn from_snapshot_inner(
         });
         index = 0;
     }
+    let mut dpi_stages = Vec::new();
+    let mut lighting_states = Vec::new();
+    for device in &snapshot.devices {
+        if device.connection == periph_hal::Connection::Connected {
+            if let Some(dpi) = device.capabilities.get::<periph_hal::dpi::Dpi>("main")
+                && let Ok(stage) = dpi.read_stage()
+            {
+                dpi_stages.push((device.descriptor.key.clone(), stage));
+            }
+            if let Some(lighting) =
+                device.capabilities.get::<periph_hal::lighting::Lighting>("main")
+                && let Ok(on) = lighting.read_state()
+            {
+                lighting_states.push((device.descriptor.key.clone(), on));
+            }
+        }
+    }
     ScanReport {
         snapshot,
         batteries,
+        dpi_stages,
+        lighting_states,
     }
 }
 
@@ -324,8 +366,26 @@ pub fn merge_report(
     report: ScanReport,
     now: u64,
 ) -> Vec<Device> {
-    let merged = model::merge_snapshot(previous, &report.snapshot);
+    let mut merged = model::merge_snapshot(previous, &report.snapshot);
     batteries.apply(&report.batteries, &merged, now);
+    for (key, stage) in &report.dpi_stages {
+        if let Some(device_id) = merged.bindings.get(key)
+            && let Some(device) = merged.devices.iter_mut().find(|d| &d.saved.id == device_id)
+        {
+            device.current_dpi_stage = *stage;
+            if stage.is_some() {
+                device.saved.last_dpi_stage = *stage;
+            }
+        }
+    }
+    for (key, on) in &report.lighting_states {
+        if let Some(device_id) = merged.bindings.get(key)
+            && let Some(device) = merged.devices.iter_mut().find(|d| &d.saved.id == device_id)
+        {
+            device.current_lighting_on = Some(*on);
+            device.saved.last_lighting_on = Some(*on);
+        }
+    }
     merged.devices
 }
 

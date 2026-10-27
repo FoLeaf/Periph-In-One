@@ -243,6 +243,8 @@ pub(crate) fn version_one(bytes: &[u8]) -> Result<Config, serde_json::Error> {
                     .into(),
                 }],
             },
+            last_dpi_stage: None,
+            last_lighting_on: None,
         });
     }
     Ok(config)

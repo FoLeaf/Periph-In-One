@@ -205,7 +205,7 @@ pub fn discovery_report() -> Result<DiscoveryReport, HardwareError> {
             let expected_description = description.clone();
             let slot = outcome.slot;
             let unsupported = outcome.unsupported;
-            let lock = lock.clone();
+            let battery_lock = lock.clone();
             capabilities.insert(
                 "main",
                 Battery::new(move || {
@@ -215,7 +215,7 @@ pub fn discovery_report() -> Result<DiscoveryReport, HardwareError> {
                             facts: DeviceFacts::default(),
                         });
                     }
-                    let _guard = lock.lock().map_err(|_| {
+                    let _guard = battery_lock.lock().map_err(|_| {
                         HardwareError::new(ErrorKind::Unavailable, "receiver session lock poisoned")
                     })?;
                     let api = HidApi::new().map_err(HardwareError::transport)?;

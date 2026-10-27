@@ -20,6 +20,10 @@ pub struct SavedDevice {
     pub components: Vec<SavedComponent>,
     pub alias: String,
     pub identity_conflict: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dpi_stage: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_lighting_on: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -47,6 +51,12 @@ pub struct Device {
     pub present: bool,
     pub connection: Connection,
     pub issue: Option<HardwareError>,
+    pub dpi: Option<periph_hal::dpi::Dpi>,
+    pub current_dpi_stage: Option<u8>,
+    pub dpi_pending: bool,
+    pub lighting: Option<periph_hal::lighting::Lighting>,
+    pub current_lighting_on: Option<bool>,
+    pub lighting_pending: bool,
 }
 
 #[derive(Debug)]
@@ -69,11 +79,21 @@ pub fn restore(saved: &[SavedDevice]) -> Vec<Device> {
     saved
         .iter()
         .cloned()
-        .map(|saved| Device {
-            saved,
-            present: false,
-            connection: Connection::Disconnected,
-            issue: None,
+        .map(|saved| {
+            let last_dpi_stage = saved.last_dpi_stage;
+            let last_lighting_on = saved.last_lighting_on;
+            Device {
+                saved,
+                present: false,
+                connection: Connection::Disconnected,
+                issue: None,
+                dpi: None,
+                current_dpi_stage: last_dpi_stage,
+                dpi_pending: false,
+                lighting: None,
+                current_lighting_on: last_lighting_on,
+                lighting_pending: false,
+            }
         })
         .collect()
 }
@@ -682,6 +702,12 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                     Connection::Unknown
                 },
                 issue: failure_for_saved_route(snapshot, &old.saved).cloned(),
+                dpi: old.dpi.clone(),
+                current_dpi_stage: old.current_dpi_stage.or(old.saved.last_dpi_stage),
+                dpi_pending: false,
+                lighting: old.lighting.clone(),
+                current_lighting_on: old.current_lighting_on.or(old.saved.last_lighting_on),
+                lighting_pending: false,
             }
         })
         .collect();
@@ -777,15 +803,24 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                     serde_json::to_string(&descriptor.key).unwrap()
                 ));
             }
+            let saved_dev = SavedDevice {
+                id,
+                descriptor: descriptor.clone(),
+                ..SavedDevice::default()
+            };
+            let last_dpi_stage = saved_dev.last_dpi_stage;
+            let last_lighting_on = saved_dev.last_lighting_on;
             devices.push(Device {
-                saved: SavedDevice {
-                    id,
-                    descriptor: descriptor.clone(),
-                    ..SavedDevice::default()
-                },
+                saved: saved_dev,
                 present: false,
                 connection: Connection::Disconnected,
                 issue: None,
+                dpi: None,
+                current_dpi_stage: last_dpi_stage,
+                dpi_pending: false,
+                lighting: None,
+                current_lighting_on: last_lighting_on,
+                lighting_pending: false,
             });
             devices.len() - 1
         } else {
@@ -985,6 +1020,14 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         } else {
             observation.issue.clone()
         };
+        if let Some(dpi) = observation.capabilities.get::<periph_hal::dpi::Dpi>("main") {
+            device.dpi = Some(dpi.clone());
+        }
+        if let Some(lighting) =
+            observation.capabilities.get::<periph_hal::lighting::Lighting>("main")
+        {
+            device.lighting = Some(lighting.clone());
+        }
         bindings.insert(descriptor.key.clone(), device.saved.id.clone());
     }
     // Earlier bindings may point at a duplicate absorbed later in this round.

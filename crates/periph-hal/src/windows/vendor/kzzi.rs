@@ -150,18 +150,17 @@ fn read_profile(link: &KzziLink) -> Result<[u8; 128], HardwareError> {
         let mut count = 0;
         let mut collected = [false; 10];
         while Instant::now() < end && count < 10 {
-            if let Some(n) = link.read(&mut buffer, Duration::from_millis(100)) {
-                if n >= 20
-                    && protocol::kzzi_frame_ok(&buffer[..20])
-                    && (buffer[1] == 0x44 || buffer[1] == 0x04)
-                    && buffer[2] == 10
-                {
-                    let seq = buffer[3] as usize;
-                    if seq < 10 && !collected[seq] {
-                        pages[seq].copy_from_slice(&buffer[..20]);
-                        collected[seq] = true;
-                        count += 1;
-                    }
+            if let Some(n) = link.read(&mut buffer, Duration::from_millis(100))
+                && n >= 20
+                && protocol::kzzi_frame_ok(&buffer[..20])
+                && (buffer[1] == 0x44 || buffer[1] == 0x04)
+                && buffer[2] == 10
+            {
+                let seq = buffer[3] as usize;
+                if seq < 10 && !collected[seq] {
+                    pages[seq].copy_from_slice(&buffer[..20]);
+                    collected[seq] = true;
+                    count += 1;
                 }
             }
         }
