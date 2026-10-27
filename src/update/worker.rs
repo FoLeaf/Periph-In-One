@@ -384,7 +384,6 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                             {
                                 state.transaction = None;
                             }
-                            let keys = super::trusted_keys()?;
                             super::transaction::cleanup(&root, &state);
                             let remote = release(None, &stop)?;
                             let current = Version::parse(env!("CARGO_PKG_VERSION"))
@@ -418,6 +417,7 @@ pub fn start(root: PathBuf, schema: u32, host: Host) -> Result<Controller, Strin
                                 body: remote.body.clone().unwrap_or_default(),
                             });
                             (host.emit)(Event::Release(state.release.clone().map(Box::new)));
+                            let keys = super::trusted_keys()?;
                             let name = format!("periph-in-one-{candidate}-windows-x64-ota.zip");
                             let asset =
                                 remote

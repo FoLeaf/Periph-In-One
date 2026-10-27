@@ -3993,6 +3993,7 @@ dependencies = [
 name = "ota-release"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "hex",
  "periph-in-one",
  "semver",

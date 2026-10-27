@@ -11,4 +11,5 @@ semver = "1"
 zip = { version = "=9.1.2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 hex = "0.4"
+getrandom = "0.4"
 zipsign-api = { version = "=0.2.2", default-features = false, features = ["sign-zip"] }

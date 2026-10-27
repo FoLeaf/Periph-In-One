@@ -82,8 +82,16 @@ fn run() -> Result<(), String> {
             signed.persist(path).map_err(|e| e.to_string())?;
             verify(path)?;
         }
+        Some("keygen") if args.len() == 1 => {
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).map_err(|e| format!("Failed to generate random seed: {e}"))?;
+            let key = zipsign_api::SigningKey::from_bytes(&seed);
+            let public = key.verifying_key().to_bytes();
+            println!("PERIPH_OTA_SIGNING_SEED={}", hex::encode(seed));
+            println!("PERIPH_OTA_PUBLIC_KEYS={}", hex::encode(public));
+        }
         Some("verify") if args.len() == 2 => verify(Path::new(&args[1]))?,
-        _ => return Err("Usage: ota-release pack <exe> <licenses> <output.zip> <version> | sign <package.zip> | verify <package.zip>".into()),
+        _ => return Err("Usage: ota-release keygen | prepare <exe> <output> <version> | pack <exe> <licenses> <output.zip> <version> | sign <package.zip> | verify <package.zip>".into()),
     }
     Ok(())
 }
