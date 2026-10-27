@@ -11,7 +11,7 @@
 
 **Periph In One** 是面向 Windows 10/11 x64 的便携外设电量工具。把支持的 2.4G 接收器接到电脑，即可在一个面板里查看电量；收起窗口后，从系统托盘随时唤出。
 
-Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当前版本 **0.23.0**，包含默认关闭的 OTA 测试实现。
+Rust + Slint，使用软件渲染，无需 Python 或 WebView2 运行时。当前版本 **0.23.1**，包含默认关闭的 OTA 测试实现。
 
 ## 界面一览
 
@@ -90,7 +90,7 @@ cargo build --locked --release -p periph-in-one
 创建便携 ZIP：
 
 ```powershell
-cargo run --locked --release -p ota-release -- prepare target/release/periph-in-one.exe dist 0.23.0
+cargo run --locked --release -p ota-release -- prepare target/release/periph-in-one.exe dist 0.23.1
 ```
 
 生成完整便携 ZIP 和未签名 OTA ZIP，来自同一 EXE。完整包包含程序、文档、图片、校验和与依赖许可，不包含本机配置；已有同名 ZIP 时拒绝覆盖。未签名 OTA 仅供发行流水线处理，客户端不会安装。正式密钥配置与验收进度见 [OTA 实施记录](docs/OTA-UPDATE.md)。

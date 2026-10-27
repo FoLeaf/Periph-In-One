@@ -455,7 +455,12 @@ fn earlier_docked_gamepad_promotes_id_when_uid_arrives() {
     let docked = gamepad("port-1", 0x2106, "");
     let mut first = model::merge_snapshot(&[], &snapshot(vec![docked], &["windows.hid"])).devices;
     assert_eq!(first.len(), 1);
-    assert!(first[0].saved.id.starts_with("identity:[\"windows.usb-port\""));
+    assert!(
+        first[0]
+            .saved
+            .id
+            .starts_with("identity:[\"windows.usb-port\"")
+    );
     first[0].saved.alias = "客厅手柄".into();
 
     // Active personality arrives with hardware UID:
@@ -477,7 +482,12 @@ fn simultaneous_dongle_and_charging_cable_merge_into_single_gamepad() {
     );
     assert_eq!(result.devices.len(), 1);
     assert!(result.devices[0].present);
-    assert!(result.devices[0].saved.id.starts_with("identity:[\"usb:413d\""));
+    assert!(
+        result.devices[0]
+            .saved
+            .id
+            .starts_with("identity:[\"usb:413d\"")
+    );
     assert_eq!(
         result.bindings.get(&periph_hal::DeviceKey {
             backend: "windows.hid".into(),

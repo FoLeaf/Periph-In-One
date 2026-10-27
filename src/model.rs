@@ -760,7 +760,7 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 (matched
                     || routes(&device.saved).any(|key| key == &descriptor.key)
                     || personality_match(&device.saved.descriptor, descriptor))
-                    .then_some(index)
+                .then_some(index)
             })
             .collect();
         let index = if candidates.is_empty() {
@@ -895,9 +895,10 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         let mut updated = descriptor.clone();
         updated.components = observed_components(observation);
         if personality_match(&device.saved.descriptor, descriptor) {
-            let incoming_is_charging = descriptor.identifiers.iter().any(|id| {
-                id.namespace == "usb" && id.vendor == 0x413d && id.product == 0x2106
-            });
+            let incoming_is_charging = descriptor
+                .identifiers
+                .iter()
+                .any(|id| id.namespace == "usb" && id.vendor == 0x413d && id.product == 0x2106);
             if incoming_is_charging && !device.saved.descriptor.name.is_empty() {
                 updated.name = device.saved.descriptor.name.clone();
             }
@@ -954,13 +955,10 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
             updated.name = device.saved.descriptor.name.clone();
         }
         device.saved.descriptor = updated;
-        let canonical_id = usable_claims(
-            &device.saved.descriptor,
-            device.saved.identity_conflict,
-        )
-        .max_by_key(|(identity, _)| rank(identity.kind))
-        .map(|(_, key)| key)
-        .unwrap_or_else(|| device.saved.id.clone());
+        let canonical_id = usable_claims(&device.saved.descriptor, device.saved.identity_conflict)
+            .max_by_key(|(identity, _)| rank(identity.kind))
+            .map(|(_, key)| key)
+            .unwrap_or_else(|| device.saved.id.clone());
         let current_id = device.saved.id.clone();
         let is_weak_auto_id = current_id.starts_with("identity:[\"windows.usb-port\"")
             || current_id.starts_with("route:");
