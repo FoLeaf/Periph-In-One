@@ -16,51 +16,74 @@ pub fn atk_battery(report: &[u8]) -> Option<u8> {
         .then(|| report[7])
 }
 
-/// Generic FF05 output frame: report ID 8, 64 bytes total.
-/// byte 1: checksum = sum(bytes 2..64) & 0xFF
-/// byte 2: cmdCode = 0x72
-/// byte 3: paramLen
-/// byte 4: cmdSn
-/// byte 5: target (0x01 for wireless mouse / dongle receiver)
-/// byte 6: commandId
-/// byte 7: cmdLen
-/// byte 8..: payload
-pub fn atk_ff05_request(command_id: u8, payload: &[u8]) -> [u8; 64] {
+/// Query current active configuration on FF05 mouse:
+/// Command 9 (GetCurrentMouseConfig), paramLen = 20, cmdLen = 18.
+pub fn atk_ff05_current_config_request() -> [u8; 64] {
     let mut report = [0u8; 64];
     report[0] = 8;
     report[2] = 0x72;
-    report[3] = (payload.len() as u8).saturating_add(1);
-    report[4] = 0x00;
-    report[5] = 0x01;
-    report[6] = command_id;
-    report[7] = payload.len() as u8;
-    let copy_len = payload.len().min(56);
-    if copy_len > 0 {
-        report[8..8 + copy_len].copy_from_slice(&payload[..copy_len]);
-    }
+    report[3] = 20;
+    report[4] = 0;
+    report[5] = 0x01; // target: dongleMouse
+    report[6] = 0x09; // commandId: GetCurrentMouseConfig
+    report[7] = 18;
     report[1] = report[2..].iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
     report
 }
 
-/// Set DPI stage (1..=4 for 400, 800, 1200, 1600) on FF05 mice (Command 2 = SetDpi).
-pub fn atk_ff05_set_dpi_request(stage: u8) -> [u8; 64] {
-    atk_ff05_request(0x02, &[stage])
-}
-
-/// Query DPI on FF05 mice (Command 23 = GetAddressData with address 4).
-pub fn atk_ff05_get_dpi_request() -> [u8; 64] {
-    atk_ff05_request(0x17, &[0x04])
-}
-
-/// Parse DPI stage reply from FF05 mouse.
-pub fn atk_ff05_parse_dpi(report: &[u8]) -> Option<u8> {
-    if report.len() >= 8 && report[1] == 0x72 && (report[5] == 0x02 || report[5] == 0x17) {
-        let val = report[7];
-        if (1..=7).contains(&val) {
-            return Some(val);
+/// Parse current active DPI value from GetCurrentMouseConfig reply.
+pub fn atk_ff05_parse_current_dpi_value(report: &[u8]) -> Option<u16> {
+    if report.len() >= 13 && report[2] == 0x72 && report[6] == 0x09 {
+        let dpi = u16::from_le_bytes([report[11], report[12]]);
+        if (100..=50000).contains(&dpi) {
+            return Some(dpi);
+        }
+    }
+    if report.len() >= 12 && report[1] == 0x72 && report[5] == 0x09 {
+        let dpi = u16::from_le_bytes([report[10], report[11]]);
+        if (100..=50000).contains(&dpi) {
+            return Some(dpi);
         }
     }
     None
+}
+
+/// Convert DPI value to 1-based stage (1..=4 for 400, 800, 1200, 1600).
+pub fn atk_dpi_value_to_stage(dpi: u16) -> Option<u8> {
+    match dpi {
+        350..=450 => Some(1),
+        750..=850 => Some(2),
+        1150..=1250 => Some(3),
+        1550..=1650 => Some(4),
+        _ => None,
+    }
+}
+
+/// Set DPI stage and value on FF05 mouse (Command 2 = SetDpi).
+/// paramLen = 12, cmdLen = 10, payload: [currentIndex, xDpi LE, yDpi LE, B, G, R, 0, enable=1].
+pub fn atk_ff05_set_dpi_request(stage: u8) -> [u8; 64] {
+    let (stage_idx, dpi_value) = match stage {
+        1 => (0u8, 400u16),
+        2 => (1u8, 800u16),
+        3 => (2u8, 1200u16),
+        4 => (3u8, 1600u16),
+        _ => (0u8, 400u16),
+    };
+    let mut report = [0u8; 64];
+    report[0] = 8;
+    report[2] = 0x72;
+    report[3] = 12; // paramLen
+    report[4] = 0;
+    report[5] = 0x01; // target: dongleMouse
+    report[6] = 0x02; // commandId: SetDpi
+    report[7] = 10; // cmdLen
+    report[8] = stage_idx;
+    let le = dpi_value.to_le_bytes();
+    report[9..11].copy_from_slice(&le); // xDpi
+    report[11..13].copy_from_slice(&le); // yDpi
+    report[17] = 1; // enable
+    report[1] = report[2..].iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
+    report
 }
 
 /// FF02 fallback interface of the same ATK receiver. Preserves the verified

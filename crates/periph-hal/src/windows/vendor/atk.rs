@@ -137,13 +137,16 @@ fn read_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice) -> Result<Optio
     let mut buffer = [0u8; 256];
     for _ in 0..2 {
         drain(reader);
-        send(writer, &protocol::atk_ff05_get_dpi_request())?;
+        send(writer, &protocol::atk_ff05_current_config_request())?;
         let end = Instant::now() + Duration::from_millis(500);
         while Instant::now() < end {
             let n = reader
                 .read_timeout(&mut buffer, 100)
                 .map_err(HardwareError::transport)?;
-            if n >= 8 && let Some(stage) = protocol::atk_ff05_parse_dpi(&buffer[..n]) {
+            if n >= 12
+                && let Some(dpi) = protocol::atk_ff05_parse_current_dpi_value(&buffer[..n])
+                && let Some(stage) = protocol::atk_dpi_value_to_stage(dpi)
+            {
                 return Ok(Some(stage));
             }
         }
@@ -154,17 +157,11 @@ fn read_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice) -> Result<Optio
 fn set_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
     drain(reader);
     send(writer, &protocol::atk_ff05_set_dpi_request(stage))?;
-    let end = Instant::now() + Duration::from_millis(300);
-    let mut buffer = [0u8; 256];
-    while Instant::now() < end {
-        let n = reader
-            .read_timeout(&mut buffer, 80)
-            .map_err(HardwareError::transport)?;
-        if n >= 8 && let Some(readback) = protocol::atk_ff05_parse_dpi(&buffer[..n])
-            && readback == stage
-        {
-            return Ok(());
-        }
+    std::thread::sleep(Duration::from_millis(60));
+    if let Ok(Some(readback)) = read_current_dpi_ff05(reader, writer)
+        && readback == stage
+    {
+        return Ok(());
     }
     Ok(())
 }
