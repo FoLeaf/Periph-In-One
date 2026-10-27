@@ -351,12 +351,11 @@ impl App {
                     .into(),
                     alias: saved.alias.clone().into(),
                     identity_note: identity_note(device).into(),
-                    has_dpi: device.dpi.is_some()
-                        || (device.saved.last_dpi_stage.is_some() && !device.present),
+                    has_dpi: device.dpi.is_some() || device.saved.last_dpi_stage.is_some(),
                     dpi_stage: device.current_dpi_stage.unwrap_or(0) as i32,
                     dpi_pending: device.dpi_pending,
                     has_lighting: device.lighting.is_some()
-                        || (device.saved.last_lighting_on.is_some() && !device.present),
+                        || device.saved.last_lighting_on.is_some(),
                     lighting_on: device.current_lighting_on.unwrap_or(false),
                     lighting_pending: device.lighting_pending,
                 }

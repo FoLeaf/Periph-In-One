@@ -27,46 +27,30 @@ export struct DeviceRow {
     lighting-pending: bool,
 }
 
-component DpiButton inherits Rectangle {
+component TabsTrigger inherits Rectangle {
     in property <string> text;
     in property <bool> active;
     in property <bool> disabled;
     callback clicked();
-    border-radius: 6px;
-    background: root.active ? #18181b : (touch.has-hover && !root.disabled ? #e4e4e9 : #f0f0f3);
-    Text {
-        text: root.text;
-        font-size: 10px;
-        font-weight: root.active ? 600 : 500;
-        color: root.active ? #ffffff : (root.disabled ? #a0a0a8 : #27272a);
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    touch := TouchArea {
-        mouse-cursor: root.disabled ? default : pointer;
-        clicked => {
-            if !root.disabled {
-                root.clicked();
-            }
-        }
-    }
-}
 
-component LightButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> active;
-    in property <bool> disabled;
-    callback clicked();
-    border-radius: 6px;
-    background: root.active ? #18181b : (touch.has-hover && !root.disabled ? #e4e4e9 : #f0f0f3);
+    border-radius: 5px;
+    background: root.active ? #ffffff : (touch.has-hover && !root.disabled ? #e4e4e8 : transparent);
+    drop-shadow-blur: root.active ? 2px : 0px;
+    drop-shadow-color: root.active ? #00000018 : transparent;
+    drop-shadow-offset-y: root.active ? 1px : 0px;
+    border-width: root.active ? 0.5px : 0px;
+    border-color: root.active ? #dcdde3 : transparent;
+    opacity: root.disabled ? 0.45 : 1.0;
+
     Text {
         text: root.text;
         font-size: 11px;
         font-weight: root.active ? 600 : 500;
-        color: root.active ? #ffffff : (root.disabled ? #a0a0a8 : #27272a);
+        color: root.active ? #18181b : #71717a;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+
     touch := TouchArea {
         mouse-cursor: root.disabled ? default : pointer;
         clicked => {
@@ -133,17 +117,92 @@ component DeviceCard inherits Rectangle {
     }
 
     if root.data.has-dpi: HorizontalLayout {
-        x: 18px; y: 138px; width: parent.width - 36px; height: 24px; spacing: 6px;
-        DpiButton { text: "400"; active: root.data.dpi-stage == 1; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(1); } }
-        DpiButton { text: "800"; active: root.data.dpi-stage == 2; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(2); } }
-        DpiButton { text: "1200"; active: root.data.dpi-stage == 3; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(3); } }
-        DpiButton { text: "1600"; active: root.data.dpi-stage == 4; disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending; clicked => { root.set-dpi(4); } }
+        x: 18px; y: 138px; width: parent.width - 36px; height: 28px;
+        alignment: space-between;
+
+        Text {
+            text: "DPI";
+            font-size: 11px;
+            font-weight: 600;
+            color: root.data.present ? #71717a : #a1a1aa;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 176px;
+            height: 28px;
+            border-radius: 7px;
+            background: #f1f2f5;
+            border-width: 1px;
+            border-color: #e5e6eb;
+
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+                TabsTrigger {
+                    text: "400";
+                    active: root.data.dpi-stage == 1;
+                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    clicked => { root.set-dpi(1); }
+                }
+                TabsTrigger {
+                    text: "800";
+                    active: root.data.dpi-stage == 2;
+                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    clicked => { root.set-dpi(2); }
+                }
+                TabsTrigger {
+                    text: "1200";
+                    active: root.data.dpi-stage == 3;
+                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    clicked => { root.set-dpi(3); }
+                }
+                TabsTrigger {
+                    text: "1600";
+                    active: root.data.dpi-stage == 4;
+                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    clicked => { root.set-dpi(4); }
+                }
+            }
+        }
     }
     if root.data.has-lighting: HorizontalLayout {
-        x: 18px; y: 138px; width: min(parent.width - 36px, 140px); height: 24px; spacing: 6px;
-        Text { text: "灯光"; font-size: 11px; color: root.data.present ? #5a5a62 : #929299; vertical-alignment: center; min-width: 28px; }
-        LightButton { text: "开"; active: root.data.lighting-on; disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending; clicked => { root.toggle-lighting(true); } }
-        LightButton { text: "关"; active: !root.data.lighting-on; disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending; clicked => { root.toggle-lighting(false); } }
+        x: 18px; y: 138px; width: parent.width - 36px; height: 28px;
+        alignment: space-between;
+
+        Text {
+            text: "灯光";
+            font-size: 11px;
+            font-weight: 600;
+            color: root.data.present ? #71717a : #a1a1aa;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 88px;
+            height: 28px;
+            border-radius: 7px;
+            background: #f1f2f5;
+            border-width: 1px;
+            border-color: #e5e6eb;
+
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+                TabsTrigger {
+                    text: "开";
+                    active: root.data.lighting-on;
+                    disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending;
+                    clicked => { root.toggle-lighting(true); }
+                }
+                TabsTrigger {
+                    text: "关";
+                    active: !root.data.lighting-on;
+                    disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending;
+                    clicked => { root.toggle-lighting(false); }
+                }
+            }
+        }
     }
 
     if root.show-hardware-name: Text { x: 18px; y: 172px; width: parent.width - 36px; height: 16px; text: root.data.hardware-name; color: #6c6c74; font-size: 11px; overflow: elide; }

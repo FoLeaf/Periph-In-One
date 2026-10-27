@@ -4,12 +4,17 @@
 
 use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
+    dpi::{Dpi, DpiController},
     protocol,
     vendor::{Outcome, VendorAdapter},
-    windows::transport::{drain, open_pair, send},
+    windows::transport::{drain, open_pair, open_pair_path, send},
 };
-use hidapi::{DeviceInfo, HidApi};
-use std::time::{Duration, Instant};
+use hidapi::{DeviceInfo, HidApi, HidDevice};
+use std::{
+    ffi::CString,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 /// FF05/usage-1 mouse and receiver PIDs from the ATK HUB device table
 /// (filter-hsnHUoY9.js, review-cleaned 2026-10-25). Peripherals sharing the
@@ -55,6 +60,147 @@ impl VendorAdapter for AtkMouse {
             Err(error) => Outcome::failure(error),
         }
     }
+
+    fn populate_capabilities(
+        &self,
+        info: &DeviceInfo,
+        _slot: Option<u8>,
+        lock: Arc<Mutex<()>>,
+        capabilities: &mut crate::Capabilities,
+    ) {
+        let path = info.path().to_owned();
+        let usage_page = info.usage_page();
+        let controller = AtkMouseDpiController {
+            path,
+            usage_page,
+            lock,
+            cached_stage: Arc::new(Mutex::new(None)),
+        };
+        let _ = capabilities.insert("main", Dpi::new(vec![400, 800, 1200, 1600], controller));
+    }
+}
+
+struct AtkMouseDpiController {
+    path: CString,
+    usage_page: u16,
+    lock: Arc<Mutex<()>>,
+    cached_stage: Arc<Mutex<Option<u8>>>,
+}
+
+impl DpiController for AtkMouseDpiController {
+    fn read_stage(&self) -> Result<Option<u8>, HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "mouse session lock poisoned")
+        })?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let (reader, writer) = open_pair_path(&api, &self.path)?;
+        let stage = if self.usage_page == 0xff05 {
+            read_current_dpi_ff05(&reader, &writer)
+        } else {
+            read_current_dpi_ff02(&reader, &writer)
+        };
+        if let Ok(Some(st)) = stage {
+            if let Ok(mut cache) = self.cached_stage.lock() {
+                *cache = Some(st);
+            }
+            return Ok(Some(st));
+        }
+        if let Ok(cache) = self.cached_stage.lock()
+            && cache.is_some()
+        {
+            return Ok(*cache);
+        }
+        stage
+    }
+
+    fn set_stage(&self, stage: u8) -> Result<(), HardwareError> {
+        let _guard = self.lock.lock().map_err(|_| {
+            HardwareError::new(ErrorKind::Unavailable, "mouse session lock poisoned")
+        })?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let (reader, writer) = open_pair_path(&api, &self.path)?;
+        let res = if self.usage_page == 0xff05 {
+            set_current_dpi_ff05(&reader, &writer, stage)
+        } else {
+            set_current_dpi_ff02(&reader, &writer, stage)
+        };
+        if res.is_ok()
+            && let Ok(mut cache) = self.cached_stage.lock()
+        {
+            *cache = Some(stage);
+        }
+        res
+    }
+}
+
+fn read_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>, HardwareError> {
+    let mut buffer = [0u8; 256];
+    for _ in 0..2 {
+        drain(reader);
+        send(writer, &protocol::atk_ff05_get_dpi_request())?;
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            let n = reader
+                .read_timeout(&mut buffer, 100)
+                .map_err(HardwareError::transport)?;
+            if n >= 8 && let Some(stage) = protocol::atk_ff05_parse_dpi(&buffer[..n]) {
+                return Ok(Some(stage));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn set_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
+    drain(reader);
+    send(writer, &protocol::atk_ff05_set_dpi_request(stage))?;
+    let end = Instant::now() + Duration::from_millis(300);
+    let mut buffer = [0u8; 256];
+    while Instant::now() < end {
+        let n = reader
+            .read_timeout(&mut buffer, 80)
+            .map_err(HardwareError::transport)?;
+        if n >= 8 && let Some(readback) = protocol::atk_ff05_parse_dpi(&buffer[..n])
+            && readback == stage
+        {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn read_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>, HardwareError> {
+    let mut buffer = [0u8; 64];
+    for _ in 0..2 {
+        drain(reader);
+        send(writer, &protocol::atk_v2_current_dpi_request())?;
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            let n = reader
+                .read_timeout(&mut buffer, 100)
+                .map_err(HardwareError::transport)?;
+            if n > 0 && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n]) {
+                return Ok(Some(stage));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn set_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
+    drain(reader);
+    send(writer, &protocol::atk_v2_set_current_dpi_request(stage))?;
+    let end = Instant::now() + Duration::from_millis(300);
+    let mut buffer = [0u8; 64];
+    while Instant::now() < end {
+        let n = reader
+            .read_timeout(&mut buffer, 80)
+            .map_err(HardwareError::transport)?;
+        if n > 0 && protocol::atk_v2_set_eeprom_ok(&buffer[..n], 4) {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, HardwareError> {

@@ -16,6 +16,53 @@ pub fn atk_battery(report: &[u8]) -> Option<u8> {
         .then(|| report[7])
 }
 
+/// Generic FF05 output frame: report ID 8, 64 bytes total.
+/// byte 1: checksum = sum(bytes 2..64) & 0xFF
+/// byte 2: cmdCode = 0x72
+/// byte 3: paramLen
+/// byte 4: cmdSn
+/// byte 5: target (0x01 for wireless mouse / dongle receiver)
+/// byte 6: commandId
+/// byte 7: cmdLen
+/// byte 8..: payload
+pub fn atk_ff05_request(command_id: u8, payload: &[u8]) -> [u8; 64] {
+    let mut report = [0u8; 64];
+    report[0] = 8;
+    report[2] = 0x72;
+    report[3] = (payload.len() as u8).saturating_add(1);
+    report[4] = 0x00;
+    report[5] = 0x01;
+    report[6] = command_id;
+    report[7] = payload.len() as u8;
+    let copy_len = payload.len().min(56);
+    if copy_len > 0 {
+        report[8..8 + copy_len].copy_from_slice(&payload[..copy_len]);
+    }
+    report[1] = report[2..].iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
+    report
+}
+
+/// Set DPI stage (1..=4 for 400, 800, 1200, 1600) on FF05 mice (Command 2 = SetDpi).
+pub fn atk_ff05_set_dpi_request(stage: u8) -> [u8; 64] {
+    atk_ff05_request(0x02, &[stage])
+}
+
+/// Query DPI on FF05 mice (Command 23 = GetAddressData with address 4).
+pub fn atk_ff05_get_dpi_request() -> [u8; 64] {
+    atk_ff05_request(0x17, &[0x04])
+}
+
+/// Parse DPI stage reply from FF05 mouse.
+pub fn atk_ff05_parse_dpi(report: &[u8]) -> Option<u8> {
+    if report.len() >= 8 && report[1] == 0x72 && (report[5] == 0x02 || report[5] == 0x17) {
+        let val = report[7];
+        if (1..=7).contains(&val) {
+            return Some(val);
+        }
+    }
+    None
+}
+
 /// FF02 fallback interface of the same ATK receiver. Preserves the verified
 /// Python report construction: report id 8, command 4, 17 bytes.
 pub fn atk_ff02_request() -> [u8; 17] {

@@ -171,6 +171,27 @@ fn vxe_v2_eeprom_dpi_requests_and_replies() {
 }
 
 #[test]
+fn atk_ff05_dpi_frames_and_checksum() {
+    let req = atk_ff05_set_dpi_request(2);
+    assert_eq!(req[0], 8);
+    assert_eq!(req[2], 0x72);
+    assert_eq!(req[5], 0x01);
+    assert_eq!(req[6], 0x02); // SetDpi
+    assert_eq!(req[8], 2); // stage 2
+    let expected_sum = req[2..].iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
+    assert_eq!(req[1], expected_sum);
+
+    let get_req = atk_ff05_get_dpi_request();
+    assert_eq!(get_req[0], 8);
+    assert_eq!(get_req[2], 0x72);
+    assert_eq!(get_req[6], 0x17); // GetAddressData
+    assert_eq!(get_req[8], 0x04); // address 4
+
+    let reply = [0, 0x72, 2, 0, 1, 2, 1, 3, 0];
+    assert_eq!(atk_ff05_parse_dpi(&reply), Some(3));
+}
+
+#[test]
 fn kzzi_lighting_profile_split_parse_and_toggle() {
     let mut dummy_profile = [0u8; 128];
     dummy_profile[10] = 0; // off
