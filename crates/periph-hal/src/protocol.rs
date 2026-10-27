@@ -428,6 +428,38 @@ pub fn kzzi_parse_lighting_profile(pages: &[[u8; 20]; 10]) -> Option<[u8; 128]> 
     }
 }
 
+/// Collect a single profile reply, accepting reordered pages and duplicates.
+/// A new collector is required for each read attempt.
+#[derive(Default)]
+pub struct KzziLightingPages {
+    pages: [[u8; 20]; 10],
+    seen: [bool; 10],
+}
+
+impl KzziLightingPages {
+    pub fn push(&mut self, report: &[u8]) -> Option<[u8; 128]> {
+        let frame: &[u8; 20] = report.get(..20)?.try_into().ok()?;
+        let seq = usize::from(frame[3]);
+        if !kzzi_frame_ok(frame)
+            || !matches!(frame[1], 0x44 | 0x04)
+            || frame[2] != 10
+            || seq >= 10
+            || usize::from(frame[4]) != if seq == 9 { 2 } else { 14 }
+        {
+            return None;
+        }
+        if !self.seen[seq] {
+            self.pages[seq] = *frame;
+            self.seen[seq] = true;
+        }
+        if self.seen.iter().all(|seen| *seen) {
+            kzzi_parse_lighting_profile(&self.pages)
+        } else {
+            None
+        }
+    }
+}
+
 /// Check if the KZZI profile indicates lighting is currently turned on.
 /// Profile byte 10 is the active effect ID (0 = Off), and brightness in table (56 + effect * 2).
 pub fn kzzi_profile_is_lit(profile: &[u8; 128]) -> bool {

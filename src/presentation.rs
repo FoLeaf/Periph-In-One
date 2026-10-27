@@ -2,6 +2,19 @@
 use crate::{battery::BatteryView, model::Device};
 use periph_hal::{Connection, DeviceDescriptor, Identity, IdentityKind};
 
+pub fn control_error(error: &periph_hal::HardwareError) -> &'static str {
+    use periph_hal::ErrorKind;
+    match error.kind {
+        ErrorKind::Timeout => "设备未响应，请重试",
+        ErrorKind::InvalidResponse => "设置未生效，请重试",
+        ErrorKind::Unsupported => "当前设备不支持此设置",
+        ErrorKind::PermissionDenied => "无法访问设备，请关闭其他驱动后重试",
+        ErrorKind::Conflict => "设备状态已变化，请刷新后重试",
+        ErrorKind::Unavailable => "设备连接已更新，请重试",
+        _ => "与设备通信失败，请重试",
+    }
+}
+
 pub fn title(device: &Device) -> &str {
     if !device.saved.alias.is_empty() {
         &device.saved.alias

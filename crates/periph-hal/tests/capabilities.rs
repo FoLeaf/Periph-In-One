@@ -179,6 +179,9 @@ fn dpi_and_lighting_capabilities_support_state_manipulation_and_invalidation() {
     );
     assert_eq!(dpi.stages(), &[400, 800, 1200, 1600]);
     assert_eq!(dpi.read_stage().unwrap(), Some(2));
+    assert!(dpi.set_stage(0).is_err());
+    assert!(dpi.set_stage(5).is_err());
+    assert_eq!(dpi_stage.load(Ordering::SeqCst), 2);
     dpi.set_stage(4).unwrap();
     assert_eq!(dpi_stage.load(Ordering::SeqCst), 4);
     assert_eq!(dpi.read_stage().unwrap(), Some(4));

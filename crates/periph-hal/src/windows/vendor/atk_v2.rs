@@ -140,7 +140,10 @@ fn set_current_dpi(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<
         }
     }
     if !written {
-        return Err(HardwareError::new(ErrorKind::Timeout, "mouse set dpi did not respond"));
+        return Err(HardwareError::new(
+            ErrorKind::Timeout,
+            "mouse set dpi did not respond",
+        ));
     }
     let active = read_current_dpi(reader, writer)?;
     if active == Some(stage) {

@@ -22,8 +22,11 @@ export struct DeviceRow {
     has-dpi: bool,
     dpi-stage: int,
     dpi-pending: bool,
+    dpi-available: bool,
     has-lighting: bool,
     lighting-on: bool,
+    lighting-known: bool,
+    lighting-available: bool,
     lighting-pending: bool,
 }
 
@@ -142,25 +145,25 @@ component DeviceCard inherits Rectangle {
                 TabsTrigger {
                     text: "400";
                     active: root.data.dpi-stage == 1;
-                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
                     clicked => { root.set-dpi(1); }
                 }
                 TabsTrigger {
                     text: "800";
                     active: root.data.dpi-stage == 2;
-                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
                     clicked => { root.set-dpi(2); }
                 }
                 TabsTrigger {
                     text: "1200";
                     active: root.data.dpi-stage == 3;
-                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
                     clicked => { root.set-dpi(3); }
                 }
                 TabsTrigger {
                     text: "1600";
                     active: root.data.dpi-stage == 4;
-                    disabled: !root.data.present || !root.data.fresh || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
                     clicked => { root.set-dpi(4); }
                 }
             }
@@ -191,14 +194,14 @@ component DeviceCard inherits Rectangle {
                 spacing: 2px;
                 TabsTrigger {
                     text: "开";
-                    active: root.data.lighting-on;
-                    disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending;
+                    active: root.data.lighting-known && root.data.lighting-on;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.lighting-available || root.data.lighting-pending;
                     clicked => { root.toggle-lighting(true); }
                 }
                 TabsTrigger {
                     text: "关";
-                    active: !root.data.lighting-on;
-                    disabled: !root.data.present || !root.data.fresh || root.data.lighting-pending;
+                    active: root.data.lighting-known && !root.data.lighting-on;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.lighting-available || root.data.lighting-pending;
                     clicked => { root.toggle-lighting(false); }
                 }
             }

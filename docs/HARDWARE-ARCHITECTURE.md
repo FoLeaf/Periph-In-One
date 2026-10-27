@@ -124,3 +124,15 @@ v2 保存通用设备描述、访问路由、通用组件和独立的电量历�
 已经落地：backend 独立调度与增量报告、共享 deadline/代次隔离、可取消 app 等待、结构化 coverage/failure、endpoint withholding、通用组件路由与持久 ID、v2 legacy `main` 归一化。尚未实现的是：可强制终止原生同步调用、Linux/macOS/GATT 真机后端、真实音视频或笔输入能力。
 
 这些工作按实际需求和硬件验证推进。新增已有能力的适配现在即可复用接口，无需先把所有领域和调度方式实现完。
+
+## 2026-10-27 灯效与 DPI 能力复查
+
+控制能力复用 `operation::ControllerClient`，共享串行执行、撤销、队列请求、panic 隔离及执行前后代次检查。`OperationRequest` 提供 `try_take` / 有界 `wait`，丢弃或超时后尚未执行的请求不会继续访问硬件。已经进入原生 I/O 的操作仍只能等待返回。
+
+应用在 `src/hardware/controls.rs` 调度可选能力，刷新协调器只投递和 poll，不同步等待灯效或 DPI；所有读取共享刷新 deadline，失败按各自 capability ID 记录。取消刷新同时丢弃控制请求，不等待原生读写结束。KZZI 分页收集器位于纯协议层，驱动和诊断工具复用，校验分页长度、顺序、校验和及尾标记，并处理乱序和重复帧。
+
+覆盖范围内不再提供的能力会从应用移除；刷新保留仍在进行的写入标记。未知灯效状态不显示成“关”，缓存记录没有可用客户端时禁用控件。失败反馈由 presentation 按 ErrorKind 生成，页面不显示协议字符串。ATK FF05 / FF02 的 DPI 设置必须取得确认及正确回读，不能在超时或不匹配后返回成功。
+
+验证记录（Windows GNU，2026-10-27）：fmt 与 workspace all-targets Clippy 通过；workspace all-targets 测试 141 项通过，1 项 BIGBIG WON 特定硬件状态测试默认忽略。HAL 关闭默认 features、启用 serde 的测试均通过；Linux target 对应两种 features 的含 tests 编译检查通过。新增回归覆盖错误灯效与参数、无关配置保留、坏帧/乱序/重复/截断分页、请求超时取消与撤销、迟到结果、控制器 panic、慢灯效与快速电量并行、取消刷新、能力移除和 pending 状态保留。
+
+K75 真机完成关→开往返：关闭回读 false，开灯后再次独立读取为 effect 11、参数 `04 27`、lit true。Release 构建和 `--once` / `--list-devices` 均成功（4 个设备；K75 不提供电量、鼠标电量 85%）。视觉动态效果需用户观察确认；本轮未实际切换鼠标 DPI。F 盘空间耗尽后的最终构建和测试改用 C 盘缓存，未改变运行时依赖或项目技术栈。

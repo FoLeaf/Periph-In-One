@@ -153,33 +153,18 @@ fn set_lighting_state(link: &KzziLink, on: bool) -> Result<(), HardwareError> {
 }
 
 fn read_profile(link: &KzziLink) -> Result<[u8; 128], HardwareError> {
-    let mut pages = [[0u8; 20]; 10];
     let mut buffer = [0u8; 64];
     for _ in 0..3 {
         link.drain();
         link.send(&protocol::kzzi_lighting_read_request())?;
         let end = Instant::now() + Duration::from_millis(1200);
-        let mut count = 0;
-        let mut collected = [false; 10];
-        while Instant::now() < end && count < 10 {
+        let mut pages = protocol::KzziLightingPages::default();
+        while Instant::now() < end {
             if let Some(n) = link.read(&mut buffer, Duration::from_millis(100))
-                && n >= 20
-                && protocol::kzzi_frame_ok(&buffer[..20])
-                && (buffer[1] == 0x44 || buffer[1] == 0x04)
-                && buffer[2] == 10
+                && let Some(profile) = pages.push(&buffer[..n])
             {
-                let seq = buffer[3] as usize;
-                if seq < 10 && !collected[seq] {
-                    pages[seq].copy_from_slice(&buffer[..20]);
-                    collected[seq] = true;
-                    count += 1;
-                }
+                return Ok(profile);
             }
-        }
-        if count == 10
-            && let Some(profile) = protocol::kzzi_parse_lighting_profile(&pages)
-        {
-            return Ok(profile);
         }
     }
     Err(HardwareError::new(

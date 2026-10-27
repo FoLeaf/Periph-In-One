@@ -133,7 +133,10 @@ impl DpiController for AtkMouseDpiController {
     }
 }
 
-fn read_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>, HardwareError> {
+fn read_current_dpi_ff05(
+    reader: &HidDevice,
+    writer: &HidDevice,
+) -> Result<Option<u8>, HardwareError> {
     let mut buffer = [0u8; 256];
     for _ in 0..2 {
         drain(reader);
@@ -154,19 +157,28 @@ fn read_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice) -> Result<Optio
     Ok(None)
 }
 
-fn set_current_dpi_ff05(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
+fn set_current_dpi_ff05(
+    reader: &HidDevice,
+    writer: &HidDevice,
+    stage: u8,
+) -> Result<(), HardwareError> {
     drain(reader);
     send(writer, &protocol::atk_ff05_set_dpi_request(stage))?;
     std::thread::sleep(Duration::from_millis(60));
-    if let Ok(Some(readback)) = read_current_dpi_ff05(reader, writer)
-        && readback == stage
-    {
-        return Ok(());
+    if read_current_dpi_ff05(reader, writer)? == Some(stage) {
+        Ok(())
+    } else {
+        Err(HardwareError::new(
+            ErrorKind::InvalidResponse,
+            "dpi readback verification failed",
+        ))
     }
-    Ok(())
 }
 
-fn read_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>, HardwareError> {
+fn read_current_dpi_ff02(
+    reader: &HidDevice,
+    writer: &HidDevice,
+) -> Result<Option<u8>, HardwareError> {
     let mut buffer = [0u8; 64];
     for _ in 0..2 {
         drain(reader);
@@ -176,7 +188,9 @@ fn read_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice) -> Result<Optio
             let n = reader
                 .read_timeout(&mut buffer, 100)
                 .map_err(HardwareError::transport)?;
-            if n > 0 && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n]) {
+            if n > 0
+                && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n])
+            {
                 return Ok(Some(stage));
             }
         }
@@ -184,7 +198,11 @@ fn read_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice) -> Result<Optio
     Ok(None)
 }
 
-fn set_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<(), HardwareError> {
+fn set_current_dpi_ff02(
+    reader: &HidDevice,
+    writer: &HidDevice,
+    stage: u8,
+) -> Result<(), HardwareError> {
     drain(reader);
     send(writer, &protocol::atk_v2_set_current_dpi_request(stage))?;
     let end = Instant::now() + Duration::from_millis(300);
@@ -194,10 +212,20 @@ fn set_current_dpi_ff02(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Re
             .read_timeout(&mut buffer, 80)
             .map_err(HardwareError::transport)?;
         if n > 0 && protocol::atk_v2_set_eeprom_ok(&buffer[..n], 4) {
-            return Ok(());
+            return if read_current_dpi_ff02(reader, writer)? == Some(stage) {
+                Ok(())
+            } else {
+                Err(HardwareError::new(
+                    ErrorKind::InvalidResponse,
+                    "dpi readback verification failed",
+                ))
+            };
         }
     }
-    Ok(())
+    Err(HardwareError::new(
+        ErrorKind::Timeout,
+        "mouse set dpi did not respond",
+    ))
 }
 
 fn read_battery(api: &HidApi, info: &DeviceInfo) -> Result<u8, HardwareError> {

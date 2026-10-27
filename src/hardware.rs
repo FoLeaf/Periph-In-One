@@ -1,4 +1,7 @@
 //! Coordinate device-core facts and optional battery-domain observations.
+mod controls;
+use controls::{PendingControl, poll as poll_controls, queue as queue_controls};
+
 use crate::{
     battery::{Batteries, Observation},
     model::{self, Device},
@@ -28,12 +31,30 @@ fn record_capability_failure(
     component: &ComponentKey,
     error: &periph_hal::HardwareError,
 ) {
+    record_failure(
+        snapshot,
+        key,
+        component,
+        Battery::ID,
+        Battery::VERSION,
+        error,
+    );
+}
+
+fn record_failure(
+    snapshot: &mut Snapshot,
+    key: &periph_hal::DeviceKey,
+    component: &ComponentKey,
+    id: &str,
+    version: u16,
+    error: &periph_hal::HardwareError,
+) {
     snapshot.scoped_failures.push(ScopedFailure {
         scope: FailureScope::Capability {
             device: key.clone(),
             component: serde_json::to_string(component).unwrap_or_default(),
-            id: Battery::ID.into(),
-            version: Battery::VERSION,
+            id: id.into(),
+            version,
         },
         operation: OperationKind::Capability,
         error: error.clone(),
@@ -54,6 +75,7 @@ pub struct RefreshSession<'a> {
     snapshot: Snapshot,
     observations: Vec<Observation>,
     pending: Vec<PendingBattery>,
+    pending_controls: Vec<PendingControl>,
     dpi_stages: Vec<(periph_hal::DeviceKey, Option<u8>)>,
     lighting_states: Vec<(periph_hal::DeviceKey, bool)>,
     deadline: Instant,
@@ -69,6 +91,7 @@ impl<'a> RefreshSession<'a> {
             snapshot: Snapshot::default(),
             observations: Vec::new(),
             pending: Vec::new(),
+            pending_controls: Vec::new(),
             dpi_stages: Vec::new(),
             lighting_states: Vec::new(),
             deadline: Instant::now() + timeout,
@@ -84,6 +107,7 @@ impl<'a> RefreshSession<'a> {
         if self.cancelled.load(Ordering::Acquire) {
             self.done = true;
             self.pending.clear();
+            self.pending_controls.clear();
             return None;
         }
 
@@ -142,7 +166,17 @@ impl<'a> RefreshSession<'a> {
             changed = true;
         }
 
-        if self.discovery.is_complete() && self.pending.is_empty() {
+        changed |= poll_controls(
+            &mut self.pending_controls,
+            &mut self.snapshot,
+            &mut self.dpi_stages,
+            &mut self.lighting_states,
+            self.deadline,
+        );
+        if self.discovery.is_complete()
+            && self.pending.is_empty()
+            && self.pending_controls.is_empty()
+        {
             self.done = true;
         }
         changed.then(|| ScanReport {
@@ -168,21 +202,8 @@ impl<'a> RefreshSession<'a> {
                 for device_index in first..self.snapshot.devices.len() {
                     self.queue_batteries(device_index);
                 }
-                for device in &self.snapshot.devices[first..] {
-                    if device.connection == periph_hal::Connection::Connected {
-                        if let Some(dpi) = device.capabilities.get::<periph_hal::dpi::Dpi>("main")
-                            && let Ok(stage) = dpi.read_stage()
-                        {
-                            self.dpi_stages.push((device.descriptor.key.clone(), stage));
-                        }
-                        if let Some(lighting) =
-                            device.capabilities.get::<periph_hal::lighting::Lighting>("main")
-                            && let Ok(on) = lighting.read_state()
-                        {
-                            self.lighting_states.push((device.descriptor.key.clone(), on));
-                        }
-                    }
-                }
+                self.pending_controls
+                    .extend(queue_controls(&self.snapshot.devices[first..]));
             }
             Err(error) => {
                 self.snapshot.failures.push(periph_hal::BackendFailure {
@@ -256,6 +277,7 @@ fn from_snapshot_inner(
     cancelled: Option<&AtomicBool>,
 ) -> ScanReport {
     let deadline = Instant::now() + timeout;
+    let mut pending_controls = queue_controls(&snapshot.devices);
     let mut pending = Vec::<PendingBattery>::new();
     for (device_index, device) in snapshot.devices.iter().enumerate() {
         let key = device.descriptor.key.clone();
@@ -337,19 +359,17 @@ fn from_snapshot_inner(
     }
     let mut dpi_stages = Vec::new();
     let mut lighting_states = Vec::new();
-    for device in &snapshot.devices {
-        if device.connection == periph_hal::Connection::Connected {
-            if let Some(dpi) = device.capabilities.get::<periph_hal::dpi::Dpi>("main")
-                && let Ok(stage) = dpi.read_stage()
-            {
-                dpi_stages.push((device.descriptor.key.clone(), stage));
-            }
-            if let Some(lighting) =
-                device.capabilities.get::<periph_hal::lighting::Lighting>("main")
-                && let Ok(on) = lighting.read_state()
-            {
-                lighting_states.push((device.descriptor.key.clone(), on));
-            }
+    while !pending_controls.is_empty()
+        && !cancelled.is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        if !poll_controls(
+            &mut pending_controls,
+            &mut snapshot,
+            &mut dpi_stages,
+            &mut lighting_states,
+            deadline,
+        ) {
+            thread::sleep(Duration::from_millis(5));
         }
     }
     ScanReport {
@@ -600,6 +620,127 @@ mod tests {
                 .devices
                 .iter()
                 .all(|device| { device.connection == Connection::Connected })
+        );
+    }
+
+    use periph_hal::lighting::Lighting;
+
+    struct SlowLight {
+        started: Sender<()>,
+        release: Arc<Mutex<Receiver<()>>>,
+    }
+    impl periph_hal::lighting::LightingController for SlowLight {
+        fn read_state(&self) -> Result<bool, HardwareError> {
+            self.started.send(()).unwrap();
+            let _ = self.release.lock().unwrap().recv();
+            Ok(true)
+        }
+        fn set_state(&self, _: bool) -> Result<(), HardwareError> {
+            Ok(())
+        }
+    }
+    struct LightingBackend {
+        started: Sender<()>,
+        release: Arc<Mutex<Receiver<()>>>,
+    }
+    impl Backend for LightingBackend {
+        fn id(&self) -> &str {
+            "test.lighting"
+        }
+        fn inventory(&mut self) -> Result<Vec<DeviceDescriptor>, HardwareError> {
+            Ok(Vec::new())
+        }
+        fn discover(&mut self) -> Result<Vec<Device>, HardwareError> {
+            let mut device = make_device(
+                "test.lighting",
+                "keyboard",
+                "slow keyboard",
+                Battery::new(|| Ok(reading(50))),
+            );
+            device.connection = Connection::Connected;
+            device
+                .capabilities
+                .insert(
+                    "main",
+                    Lighting::new(SlowLight {
+                        started: self.started.clone(),
+                        release: self.release.clone(),
+                    }),
+                )
+                .unwrap();
+            Ok(vec![device])
+        }
+    }
+
+    #[test]
+    fn slow_lighting_does_not_block_fast_battery_or_refresh_cancellation() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut hardware = Hardware::new();
+        hardware.set_operation_timeout(Duration::from_secs(2));
+        hardware
+            .register_factory("test.lighting", move || LightingBackend {
+                started: started_tx,
+                release: Arc::new(Mutex::new(release_rx)),
+            })
+            .unwrap();
+        hardware
+            .register_factory("test.bluetooth", move || BluetoothBackend {
+                hid_battery_started: started_rx,
+            })
+            .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let mut refresh = RefreshSession::new(&mut hardware, &cancelled);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut saw_fast = false;
+        while Instant::now() < deadline && !saw_fast {
+            if let Some(report) = refresh.poll() {
+                saw_fast = report
+                    .batteries
+                    .iter()
+                    .any(|item| item.key.backend == "test.bluetooth");
+                assert!(report.lighting_states.is_empty());
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(saw_fast, "lighting read blocked the refresh coordinator");
+        cancelled.store(true, Ordering::Release);
+        assert!(refresh.poll().is_none());
+        assert!(refresh.is_done());
+        assert!(refresh.pending_controls.is_empty());
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn lighting_failure_keeps_connection_and_uses_its_own_failure_scope() {
+        struct Unavailable;
+        impl periph_hal::lighting::LightingController for Unavailable {
+            fn read_state(&self) -> Result<bool, HardwareError> {
+                Err(HardwareError::new(ErrorKind::Timeout, "test timeout"))
+            }
+            fn set_state(&self, _: bool) -> Result<(), HardwareError> {
+                Ok(())
+            }
+        }
+        let mut device = make_device(
+            "test.controls",
+            "keyboard",
+            "keyboard",
+            Battery::new(|| Ok(reading(50))),
+        );
+        device.connection = Connection::Connected;
+        device
+            .capabilities
+            .insert("main", Lighting::new(Unavailable))
+            .unwrap();
+        let report = from_snapshot(Snapshot {
+            devices: vec![device],
+            ..Snapshot::default()
+        });
+        assert!(report.lighting_states.is_empty());
+        assert_eq!(report.snapshot.devices[0].connection, Connection::Connected);
+        assert!(
+            matches!(&report.snapshot.scoped_failures[0].scope, FailureScope::Capability { id, .. } if id == Lighting::ID)
         );
     }
 }

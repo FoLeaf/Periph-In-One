@@ -15,26 +15,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .ok_or("KZZI receiver not found")?;
     let link = KzziLink::open(&info.path().to_string_lossy())?;
-    let mut pages = [[0u8; 20]; 10];
-    let mut seen = [false; 10];
     let mut buffer = [0u8; 64];
-    link.drain();
-    link.send(&protocol::kzzi_lighting_read_request())?;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && seen.contains(&false) {
-        if let Some(n) = link.read(&mut buffer, Duration::from_millis(100))
-            && n >= 20
-            && protocol::kzzi_frame_ok(&buffer[..20])
-            && matches!(buffer[1], 0x44 | 0x04)
-            && buffer[2] == 10
-            && (buffer[3] as usize) < 10
-        {
-            let seq = buffer[3] as usize;
-            pages[seq].copy_from_slice(&buffer[..20]);
-            seen[seq] = true;
+    let mut profile = None;
+    for _ in 0..3 {
+        let mut pages = protocol::KzziLightingPages::default();
+        link.drain();
+        link.send(&protocol::kzzi_lighting_read_request())?;
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < deadline {
+            if let Some(n) = link.read(&mut buffer, Duration::from_millis(100))
+                && let Some(result) = pages.push(&buffer[..n])
+            {
+                profile = Some(result);
+                break;
+            }
+        }
+        if profile.is_some() {
+            break;
         }
     }
-    let profile = protocol::kzzi_parse_lighting_profile(&pages).ok_or("invalid profile")?;
+    let profile = profile.ok_or("lighting profile read timed out")?;
+    drop(link);
     let effect = usize::from(profile[10]);
     println!(
         "effect={}, lit={}",

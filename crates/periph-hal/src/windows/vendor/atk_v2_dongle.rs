@@ -91,7 +91,9 @@ fn read_current_dpi(reader: &HidDevice, writer: &HidDevice) -> Result<Option<u8>
             let n = reader
                 .read_timeout(&mut buffer, 120)
                 .map_err(HardwareError::transport)?;
-            if n > 0 && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n]) {
+            if n > 0
+                && let Some(stage) = protocol::atk_v2_current_dpi(&buffer[..n])
+            {
                 return Ok(Some(stage));
             }
         }
@@ -120,7 +122,10 @@ fn set_current_dpi(reader: &HidDevice, writer: &HidDevice, stage: u8) -> Result<
         }
     }
     if !written {
-        return Err(HardwareError::new(ErrorKind::Timeout, "mouse set dpi did not respond"));
+        return Err(HardwareError::new(
+            ErrorKind::Timeout,
+            "mouse set dpi did not respond",
+        ));
     }
     let active = read_current_dpi(reader, writer)?;
     if active == Some(stage) {

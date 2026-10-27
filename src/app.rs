@@ -45,9 +45,9 @@ pub enum Action {
     Saved(u64, Result<(), String>),
     Autostart(bool),
     SetDpi(String, u8),
-    DpiResult(String, Result<u8, String>),
+    DpiResult(String, Result<u8, periph_hal::HardwareError>),
     ToggleLighting(String, bool),
-    LightingResult(String, Result<bool, String>),
+    LightingResult(String, Result<bool, periph_hal::HardwareError>),
     Update(UpdateEvent),
     AutomaticUpdate(bool),
     DownloadUpdate,
@@ -354,9 +354,12 @@ impl App {
                     has_dpi: device.dpi.is_some() || device.saved.last_dpi_stage.is_some(),
                     dpi_stage: device.current_dpi_stage.unwrap_or(0) as i32,
                     dpi_pending: device.dpi_pending,
+                    dpi_available: device.dpi.is_some(),
                     has_lighting: device.lighting.is_some()
                         || device.saved.last_lighting_on.is_some(),
                     lighting_on: device.current_lighting_on.unwrap_or(false),
+                    lighting_known: device.current_lighting_on.is_some(),
+                    lighting_available: device.lighting.is_some(),
                     lighting_pending: device.lighting_pending,
                 }
             })
@@ -678,16 +681,25 @@ impl App {
                 let Some(dpi) = device.dpi.clone() else {
                     return;
                 };
+                if device.dpi_pending {
+                    return;
+                }
                 device.dpi_pending = true;
                 self.update();
                 let target_id = id.clone();
-                thread::Builder::new()
-                    .name("dpi-control".into())
-                    .spawn(move || {
-                        let result = dpi.set_stage(stage).map(|_| stage).map_err(|e| e.to_string());
-                        post(Action::DpiResult(target_id, result));
-                    })
-                    .ok();
+                if let Err(error) =
+                    thread::Builder::new()
+                        .name("dpi-control".into())
+                        .spawn(move || {
+                            let result = dpi.set_stage(stage).map(|_| stage);
+                            post(Action::DpiResult(target_id, result));
+                        })
+                {
+                    post(Action::DpiResult(
+                        id,
+                        Err(periph_hal::HardwareError::transport(error)),
+                    ));
+                }
             }
             Action::DpiResult(id, result) => {
                 if let Some(device) = self.devices.iter_mut().find(|d| d.saved.id == id) {
@@ -699,7 +711,7 @@ impl App {
                             self.persist("");
                         }
                         Err(error) => {
-                            self.notice(error);
+                            self.notice(presentation::control_error(&error));
                         }
                     }
                     self.update();
@@ -715,16 +727,24 @@ impl App {
                 let Some(lighting) = device.lighting.clone() else {
                     return;
                 };
+                if device.lighting_pending {
+                    return;
+                }
                 device.lighting_pending = true;
                 self.update();
                 let target_id = id.clone();
-                thread::Builder::new()
+                if let Err(error) = thread::Builder::new()
                     .name("lighting-control".into())
                     .spawn(move || {
-                        let result = lighting.set_state(on).map(|_| on).map_err(|e| e.to_string());
+                        let result = lighting.set_state(on).map(|_| on);
                         post(Action::LightingResult(target_id, result));
                     })
-                    .ok();
+                {
+                    post(Action::LightingResult(
+                        id,
+                        Err(periph_hal::HardwareError::transport(error)),
+                    ));
+                }
             }
             Action::LightingResult(id, result) => {
                 if let Some(device) = self.devices.iter_mut().find(|d| d.saved.id == id) {
@@ -736,7 +756,7 @@ impl App {
                             self.persist("");
                         }
                         Err(error) => {
-                            self.notice(error);
+                            self.notice(presentation::control_error(&error));
                         }
                     }
                     self.update();

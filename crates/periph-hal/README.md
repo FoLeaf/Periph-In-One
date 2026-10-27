@@ -48,6 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 能力生命周期
 
+灯效 `Lighting` 与 DPI `Dpi` 是独立的控制能力，读取分别使用 `read_state()`、`read_stage()`，写入分别使用 `set_state(bool)`、`set_stage(u8)`。K75 RGB key 的开灯操作固定使用官方「随波逐流」ID 11，其他型号的效果编号不能据此推断。
+
+增量刷新调用两个客户端的 `request_read()`，通过 `OperationRequest::try_take()` 接收就绪结果，或 `wait(timeout)` 有界等待。绑定到后端 worker 后投递不阻塞；独立创建而未绑定 worker 的控制器保持同步兼容行为。丢弃请求或等待超时会取消尚未进入 I/O 的操作；客户端撤销或代次变化后，已完成的旧结果也会被拒绝。控制能力共用调度和生命周期代码，不把灯效/DPI 数据放进公共设备核心。
+
 电量客户端的契约为 `power.battery` v2。创建客户端不采样，重复读取不需要重新发现。`close()`、所属后端下一次发现（包括发现失败）、Hardware 销毁，都会使旧客户端及其克隆失效；失效后的读取在执行 I/O 前返回 Unavailable。
 
 `Battery` 串行处理同一客户端的操作；Windows HID 同一接收器的不同槽位还共享访问锁，避免交叉发送和抢应答。重新发现会等待已进入的同步读取完成；这不代表能够强制取消 Windows 同步调用。端点已消失或可验证的身份发生变化时拒绝读取；没有本体身份的协议无法保证识别两次发现之间发生的重新配对。

@@ -284,3 +284,22 @@ fn kzzi_lighting_rejects_malformed_pages() {
     profile[127] = 0;
     assert!(kzzi_parse_lighting_profile(&kzzi_split_lighting_profile(&profile)).is_none());
 }
+
+#[test]
+fn kzzi_lighting_collector_handles_reordering_duplicates_and_short_reads() {
+    let mut profile = [0; 128];
+    profile[126..].copy_from_slice(&[0x5a, 0xa5]);
+    let pages = kzzi_split_lighting_profile(&profile);
+    let mut collector = KzziLightingPages::default();
+    for len in 0..20 {
+        assert!(collector.push(&pages[0][..len]).is_none());
+    }
+    let mut bad = pages[0];
+    bad[19] ^= 1;
+    assert!(collector.push(&bad).is_none());
+    for frame in pages[1..].iter().rev() {
+        assert!(collector.push(frame).is_none());
+        assert!(collector.push(frame).is_none());
+    }
+    assert_eq!(collector.push(&pages[0]), Some(profile));
+}

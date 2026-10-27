@@ -10,6 +10,7 @@ pub mod dpi;
 mod error;
 mod hardware;
 pub mod lighting;
+pub mod operation;
 pub mod protocol;
 
 pub use capability::{

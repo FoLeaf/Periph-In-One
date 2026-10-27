@@ -683,12 +683,12 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                     Connection::Unknown
                 },
                 issue: failure_for_saved_route(snapshot, &old.saved).cloned(),
-                dpi: old.dpi.clone(),
+                dpi: if covered { None } else { old.dpi.clone() },
                 current_dpi_stage: old.current_dpi_stage.or(old.saved.last_dpi_stage),
-                dpi_pending: false,
-                lighting: old.lighting.clone(),
+                dpi_pending: old.dpi_pending,
+                lighting: if covered { None } else { old.lighting.clone() },
                 current_lighting_on: old.current_lighting_on.or(old.saved.last_lighting_on),
-                lighting_pending: false,
+                lighting_pending: old.lighting_pending,
             }
         })
         .collect();
@@ -999,8 +999,9 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         if let Some(dpi) = observation.capabilities.get::<periph_hal::dpi::Dpi>("main") {
             device.dpi = Some(dpi.clone());
         }
-        if let Some(lighting) =
-            observation.capabilities.get::<periph_hal::lighting::Lighting>("main")
+        if let Some(lighting) = observation
+            .capabilities
+            .get::<periph_hal::lighting::Lighting>("main")
         {
             device.lighting = Some(lighting.clone());
         }
