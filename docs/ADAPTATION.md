@@ -117,7 +117,9 @@ v1 配置在 `src/migration.rs` 中迁至 v2；读取 v2 时补齐 endpoint 与�
 
 来源：BigBigWonAssistant 1.0.7.7 的 DevMgr.dll 静态分析（SHA-256 41cf4c1e…8c436）。
 
-**身份模型**：全部型号共享同一组 VID/PID——413D×{2104 连接态, 2106 底座态, 2114}，另有 Switch Pro（057E:2009）与 DS4/DS3（054C:05C5、054C:0DF2）模拟人格；型号不按 PID 区分，按 USB 产品字符串区分（ZJ-GALE→GALE、C4_SERVER→Gale2、ZJ-C1ZJ→Rainbow3、ZJ-MJC6→Aether、ZJ-BLACK_→Mage、ZJ-C2SL→BLITZ2 等 12 类映射）。厂商客户端自身不过滤 FF7A（DevMgr.dll 全文零命中，FF7A/usage1 是固件描述符的属性），主应用按 VID 413D + FF7A/usage1 匹配且不锁 PID，比厂商更严且与实测一致。
+**身份模型**：全部型号共享同一组 VID/PID——413D×{2104 连接态, 2106 待机态, 2114}，另有 Switch Pro（057E:2009）与 DS4/DS3（054C:05C5、054C:0DF2）模拟人格；型号不按 PID 区分，按 USB 产品字符串区分（ZJ-GALE→GALE、C4_SERVER→Gale2、ZJ-C1ZJ→Rainbow3、ZJ-MJC6→Aether、ZJ-BLACK_→Mage、ZJ-C2SL→BLITZ2 等 12 类映射）。厂商客户端自身不过滤 FF7A（DevMgr.dll 全文零命中，FF7A/usage1 是固件描述符的属性），主应用按 VID 413D + FF7A/usage1 及 PID {2104,2106,2114} 白名单匹配。
+
+**休眠与绑定**：2106 只证明端点仍在，发现返回连接 Unknown，电量读取立即返回 Unavailable；不据 PID 推断手柄已连接或正在充电，也不重复等待静默接口超时。同端口通过通用位置/路由证据延续记录，相同本体 UUID 可跨端口关联；不同端口且缺少共同身份证据时独立保存，不按厂商、型号或人格合并。休眠保留备注与最后有效电量的原始时间，唤醒后有效 UUID/电量应答恢复连接和当前读数。
 
 **电量**：唯一电量操作码 04，应答处理器要求长度字节恰好 6（A5 06 04 电量 状态 校验和）；`protocol.rs` 的 `bigbigwon_battery` 已按此对齐（长度不为 6 即拒绝）。
 

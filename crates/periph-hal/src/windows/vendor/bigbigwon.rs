@@ -13,21 +13,29 @@ use crate::{
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 use std::time::{Duration, Instant};
 
-pub const VID: u16 = 0x413d;
-pub const PID_ACTIVE: u16 = 0x2104;
-pub const PID_CHARGING: u16 = 0x2106;
-pub const PID_WIRED: u16 = 0x2114;
+const VID: u16 = 0x413d;
+const PID_ACTIVE: u16 = 0x2104;
+const PID_IDLE: u16 = 0x2106;
+const PID_WIRED: u16 = 0x2114;
+
+// The idle endpoint stays enumerated without proving a controller is linked
+// or charging. Keep this path passive: the verified firmware does not answer.
+fn idle_endpoint() -> Outcome {
+    Outcome {
+        hardware_name: Some("BIGBIG WON 手柄".into()),
+        ..Outcome::default()
+    }
+}
 
 pub struct BigbigwonGamepad;
 
 impl VendorAdapter for BigbigwonGamepad {
     fn matches(&self, info: &DeviceInfo) -> bool {
-        // The vendor interface keeps usage page FF7A across firmware
-        // personalities (2104 linked, 2106 idle, 2114 wired), so the PID is not pinned.
+        // Restrict the shared FF7A interface to known firmware personalities.
         info.vendor_id() == VID
             && info.usage_page() == 0xff7a
             && info.usage() == 1
-            && matches!(info.product_id(), PID_ACTIVE | PID_CHARGING | PID_WIRED)
+            && matches!(info.product_id(), PID_ACTIVE | PID_IDLE | PID_WIRED)
     }
 
     fn kind(&self) -> &'static str {
@@ -35,15 +43,10 @@ impl VendorAdapter for BigbigwonGamepad {
     }
 
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
-        if info.product_id() == PID_CHARGING {
+        if info.product_id() == PID_IDLE {
             return Outcome {
-                connection: Connection::Connected,
-                hardware_name: Some("BIGBIG WON 手柄".into()),
-                issue: Some(HardwareError::new(
-                    ErrorKind::Unavailable,
-                    "手柄正在底座充电",
-                )),
-                ..Outcome::default()
+                issue: Some(HardwareError::new(ErrorKind::Unavailable, "电量暂不可用")),
+                ..idle_endpoint()
             };
         }
         match probe(api, info) {
@@ -58,12 +61,8 @@ impl VendorAdapter for BigbigwonGamepad {
     }
 
     fn discover(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
-        if info.product_id() == PID_CHARGING {
-            return vec![Outcome {
-                connection: Connection::Connected,
-                hardware_name: Some("BIGBIG WON 手柄".into()),
-                ..Outcome::default()
-            }];
+        if info.product_id() == PID_IDLE {
+            return vec![idle_endpoint()];
         }
         match open_pair(api, info) {
             Ok((reader, writer)) => {
@@ -129,4 +128,39 @@ fn gamepad_uid(reader: &HidDevice, writer: &HidDevice) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an attached BIGBIG WON endpoint in PID 2106 idle mode"]
+    fn live_idle_endpoint_does_not_claim_connection_or_charging() {
+        let api = HidApi::new().unwrap();
+        let adapter = BigbigwonGamepad;
+        let info = api
+            .device_list()
+            .find(|info| adapter.matches(info) && info.product_id() == PID_IDLE)
+            .expect("connect an idle BIGBIG WON endpoint (413D:2106)");
+        let started = Instant::now();
+        let discovered = adapter.discover(&api, info);
+        assert_eq!(discovered.len(), 1);
+        let read = adapter.read(&api, info);
+        for outcome in [&discovered[0], &read] {
+            assert_eq!(outcome.connection, Connection::Unknown);
+            assert!(outcome.uid.is_empty());
+            assert!(outcome.battery.is_none());
+            assert!(!outcome.unsupported);
+        }
+        assert!(discovered[0].issue.is_none());
+        let error = read.issue.as_ref().unwrap();
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(error.detail, "电量暂不可用");
+        println!(
+            "idle discovery/read: {:?}, elapsed={:?}",
+            read,
+            started.elapsed()
+        );
+    }
 }
