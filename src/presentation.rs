@@ -52,21 +52,40 @@ pub fn category(descriptor: &DeviceDescriptor) -> String {
 }
 
 pub fn identifiers(descriptor: &DeviceDescriptor) -> String {
-    descriptor
-        .identifiers
-        .iter()
-        .map(|id| {
-            if id.namespace == "usb" {
-                format!("USB VID: 0x{:04X} · PID: 0x{:04X}", id.vendor, id.product)
+    let mut usb_groups = Vec::<(u16, Vec<u16>)>::new();
+    let mut other = Vec::new();
+    for id in &descriptor.identifiers {
+        if id.namespace == "usb" {
+            if let Some((_, pids)) = usb_groups.iter_mut().find(|(vid, _)| *vid == id.vendor) {
+                if !pids.contains(&id.product) {
+                    pids.push(id.product);
+                }
             } else {
-                format!(
-                    "{}: 0x{:04X} / 0x{:04X}",
-                    id.namespace, id.vendor, id.product
-                )
+                usb_groups.push((id.vendor, vec![id.product]));
             }
+        } else {
+            let entry = format!(
+                "{}: 0x{:04X} / 0x{:04X}",
+                id.namespace, id.vendor, id.product
+            );
+            if !other.contains(&entry) {
+                other.push(entry);
+            }
+        }
+    }
+    let mut parts: Vec<String> = usb_groups
+        .into_iter()
+        .map(|(vid, pids)| {
+            let pid_str = pids
+                .iter()
+                .map(|pid| format!("0x{pid:04X}"))
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!("USB VID: 0x{vid:04X} · PID: {pid_str}")
         })
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .collect();
+    parts.extend(other);
+    parts.join(" · ")
 }
 
 pub fn serial(descriptor: &DeviceDescriptor) -> Option<&Identity> {

@@ -13,13 +13,21 @@ use crate::{
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 use std::time::{Duration, Instant};
 
+pub const VID: u16 = 0x413d;
+pub const PID_ACTIVE: u16 = 0x2104;
+pub const PID_CHARGING: u16 = 0x2106;
+pub const PID_WIRED: u16 = 0x2114;
+
 pub struct BigbigwonGamepad;
 
 impl VendorAdapter for BigbigwonGamepad {
     fn matches(&self, info: &DeviceInfo) -> bool {
         // The vendor interface keeps usage page FF7A across firmware
-        // personalities (2104 linked, 2106 idle), so the PID is not pinned.
-        info.vendor_id() == 0x413d && info.usage_page() == 0xff7a && info.usage() == 1
+        // personalities (2104 linked, 2106 idle, 2114 wired), so the PID is not pinned.
+        info.vendor_id() == VID
+            && info.usage_page() == 0xff7a
+            && info.usage() == 1
+            && matches!(info.product_id(), PID_ACTIVE | PID_CHARGING | PID_WIRED)
     }
 
     fn kind(&self) -> &'static str {
@@ -27,6 +35,17 @@ impl VendorAdapter for BigbigwonGamepad {
     }
 
     fn read(&self, api: &HidApi, info: &DeviceInfo) -> Outcome {
+        if info.product_id() == PID_CHARGING {
+            return Outcome {
+                connection: Connection::Connected,
+                hardware_name: Some("BIGBIG WON 手柄".into()),
+                issue: Some(HardwareError::new(
+                    ErrorKind::Unavailable,
+                    "手柄正在底座充电",
+                )),
+                ..Outcome::default()
+            };
+        }
         match probe(api, info) {
             Ok((battery, uid)) => Outcome {
                 battery,
@@ -39,6 +58,13 @@ impl VendorAdapter for BigbigwonGamepad {
     }
 
     fn discover(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
+        if info.product_id() == PID_CHARGING {
+            return vec![Outcome {
+                connection: Connection::Connected,
+                hardware_name: Some("BIGBIG WON 手柄".into()),
+                ..Outcome::default()
+            }];
+        }
         match open_pair(api, info) {
             Ok((reader, writer)) => {
                 let uid = gamepad_uid(&reader, &writer);

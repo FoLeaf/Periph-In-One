@@ -131,6 +131,25 @@ fn contradictory(a: &DeviceDescriptor, b: &DeviceDescriptor) -> bool {
         })
 }
 
+fn personality_match(a: &DeviceDescriptor, b: &DeviceDescriptor) -> bool {
+    let a_is_gamepad = a.roles.iter().any(|r| r == "input.gamepad");
+    let b_is_gamepad = b.roles.iter().any(|r| r == "input.gamepad");
+    if !a_is_gamepad || !b_is_gamepad {
+        return false;
+    }
+    let a_bbw = a.identifiers.iter().any(|id| {
+        id.namespace == "usb"
+            && id.vendor == 0x413d
+            && matches!(id.product, 0x2104 | 0x2106 | 0x2114)
+    });
+    let b_bbw = b.identifiers.iter().any(|id| {
+        id.namespace == "usb"
+            && id.vendor == 0x413d
+            && matches!(id.product, 0x2104 | 0x2106 | 0x2114)
+    });
+    a_bbw && b_bbw
+}
+
 fn rank(kind: IdentityKind) -> u8 {
     match kind {
         IdentityKind::UnitId => 4,
@@ -738,7 +757,9 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 let matched =
                     usable_claims(&device.saved.descriptor, device.saved.identity_conflict)
                         .any(|(_, key)| incoming.iter().any(|(_, incoming)| *incoming == key));
-                (matched || routes(&device.saved).any(|key| key == &descriptor.key))
+                (matched
+                    || routes(&device.saved).any(|key| key == &descriptor.key)
+                    || personality_match(&device.saved.descriptor, descriptor))
                     .then_some(index)
             })
             .collect();
@@ -770,6 +791,12 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         } else {
             candidates.sort_by_key(|&index| {
                 (
+                    !devices[index]
+                        .saved
+                        .descriptor
+                        .identities
+                        .iter()
+                        .any(strong),
                     !routes(&devices[index].saved).any(|key| key == &descriptor.key),
                     devices[index].saved.alias.is_empty(),
                     index,
@@ -867,6 +894,26 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         }
         let mut updated = descriptor.clone();
         updated.components = observed_components(observation);
+        if personality_match(&device.saved.descriptor, descriptor) {
+            let incoming_is_charging = descriptor.identifiers.iter().any(|id| {
+                id.namespace == "usb" && id.vendor == 0x413d && id.product == 0x2106
+            });
+            if incoming_is_charging && !device.saved.descriptor.name.is_empty() {
+                updated.name = device.saved.descriptor.name.clone();
+            }
+            for prior_id in &device.saved.descriptor.identifiers {
+                if !updated.identifiers.contains(prior_id) {
+                    if prior_id.namespace == "usb"
+                        && prior_id.vendor == 0x413d
+                        && prior_id.product == 0x2104
+                    {
+                        updated.identifiers.insert(0, prior_id.clone());
+                    } else {
+                        updated.identifiers.push(prior_id.clone());
+                    }
+                }
+            }
+        }
         if already_seen {
             for role in &device.saved.descriptor.roles {
                 if !updated.roles.contains(role) {
@@ -897,7 +944,9 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
         }
         // Temporarily missing strong evidence must not downgrade identity.
         for identity in &device.saved.descriptor.identities {
-            if strong(identity) && !updated.identities.contains(identity) {
+            if (strong(identity) || identity.kind == IdentityKind::Location)
+                && !updated.identities.contains(identity)
+            {
                 updated.identities.push(identity.clone());
             }
         }
@@ -905,6 +954,20 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
             updated.name = device.saved.descriptor.name.clone();
         }
         device.saved.descriptor = updated;
+        let canonical_id = usable_claims(
+            &device.saved.descriptor,
+            device.saved.identity_conflict,
+        )
+        .max_by_key(|(identity, _)| rank(identity.kind))
+        .map(|(_, key)| key)
+        .unwrap_or_else(|| device.saved.id.clone());
+        let current_id = device.saved.id.clone();
+        let is_weak_auto_id = current_id.starts_with("identity:[\"windows.usb-port\"")
+            || current_id.starts_with("route:");
+        if is_weak_auto_id && canonical_id != current_id && !canonical_id.is_empty() {
+            device.saved.id = canonical_id.clone();
+            merged_ids.push((current_id, canonical_id));
+        }
         device.saved.identity_conflict |= conflict;
         device.present |= observation.connection != Connection::Disconnected;
         device.connection = match (

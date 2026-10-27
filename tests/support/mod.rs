@@ -45,6 +45,51 @@ pub fn device(source: &str, route: &str, uid: &str, serial: &str) -> Device {
     }
 }
 
+pub fn gamepad(route: &str, pid: u16, uid: &str) -> Device {
+    let mut identities = vec![Identity {
+        namespace: "windows.usb-port".into(),
+        kind: IdentityKind::Location,
+        subject: "receiver".into(),
+        value: route.into(),
+    }];
+    if !uid.is_empty() {
+        identities.push(Identity {
+            namespace: "usb:413d".into(),
+            kind: IdentityKind::UnitId,
+            subject: "device".into(),
+            value: uid.into(),
+        });
+    }
+    Device {
+        descriptor: DeviceDescriptor {
+            key: DeviceKey {
+                backend: "windows.hid".into(),
+                local: route.into(),
+            },
+            endpoint: periph_hal::EndpointKey {
+                backend: "windows.hid".into(),
+                local: route.into(),
+            },
+            name: if uid.is_empty() {
+                "HID zkm".into()
+            } else {
+                "XBOX 360 For Windows".into()
+            },
+            identities,
+            roles: vec!["input.gamepad".into()],
+            identifiers: vec![periph_hal::HardwareIdentifier {
+                namespace: "usb".into(),
+                vendor: 0x413d,
+                product: pid,
+            }],
+            ..DeviceDescriptor::default()
+        },
+        connection: Connection::Connected,
+        capabilities: Capabilities::default(),
+        issue: None,
+    }
+}
+
 pub fn snapshot(devices: Vec<Device>, completed: &[&str]) -> Snapshot {
     Snapshot {
         devices,

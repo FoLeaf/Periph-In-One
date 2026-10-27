@@ -4,7 +4,7 @@ use periph_hal::{
     IdentityKind, OperationKind, ScopedFailure, Snapshot,
 };
 use periph_in_one::model::{self, SavedDevice};
-use support::{device, snapshot};
+use support::{device, gamepad, snapshot};
 
 #[test]
 fn generic_device_without_usb_ids_or_battery_has_a_stable_record() {
@@ -416,4 +416,103 @@ fn joined_sources_preserve_roles_and_uncertain_connection() {
             .any(|role| role == "audio.input")
     );
     assert_eq!(joined.devices[0].connection, Connection::Unknown);
+}
+
+#[test]
+fn docked_and_active_gamepad_personalities_merge_into_single_device() {
+    let active = gamepad("port-1", 0x2104, "423bca92863cba8d");
+    let mut first = model::merge_snapshot(&[], &snapshot(vec![active], &["windows.hid"])).devices;
+    assert_eq!(first.len(), 1);
+    assert!(first[0].saved.id.starts_with("identity:[\"usb:413d\""));
+    first[0].saved.alias = "客厅手柄".into();
+
+    // Docked personality (2106, silent, no UID) on the same port:
+    let docked = gamepad("port-1", 0x2106, "");
+    let second = model::merge_snapshot(&first, &snapshot(vec![docked], &["windows.hid"])).devices;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].saved.alias, "客厅手柄");
+    assert!(second[0].present);
+    assert_eq!(second[0].saved.id, first[0].saved.id);
+    assert!(
+        second[0]
+            .saved
+            .descriptor
+            .identities
+            .iter()
+            .any(|id| id.value == "423bca92863cba8d")
+    );
+
+    // Active again:
+    let active_again = gamepad("port-1", 0x2104, "423bca92863cba8d");
+    let third =
+        model::merge_snapshot(&second, &snapshot(vec![active_again], &["windows.hid"])).devices;
+    assert_eq!(third.len(), 1);
+    assert_eq!(third[0].saved.alias, "客厅手柄");
+}
+
+#[test]
+fn earlier_docked_gamepad_promotes_id_when_uid_arrives() {
+    let docked = gamepad("port-1", 0x2106, "");
+    let mut first = model::merge_snapshot(&[], &snapshot(vec![docked], &["windows.hid"])).devices;
+    assert_eq!(first.len(), 1);
+    assert!(first[0].saved.id.starts_with("identity:[\"windows.usb-port\""));
+    first[0].saved.alias = "客厅手柄".into();
+
+    // Active personality arrives with hardware UID:
+    let active = gamepad("port-1", 0x2104, "423bca92863cba8d");
+    let second = model::merge_snapshot(&first, &snapshot(vec![active], &["windows.hid"])).devices;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].saved.alias, "客厅手柄");
+    assert!(second[0].saved.id.starts_with("identity:[\"usb:413d\""));
+    assert_eq!(second[0].saved.descriptor.name, "XBOX 360 For Windows");
+}
+
+#[test]
+fn simultaneous_dongle_and_charging_cable_merge_into_single_gamepad() {
+    let active_dongle = gamepad("port-a", 0x2104, "423bca92863cba8d");
+    let charging_dock = gamepad("port-b", 0x2106, "");
+    let result = model::merge_snapshot(
+        &[],
+        &snapshot(vec![active_dongle, charging_dock], &["windows.hid"]),
+    );
+    assert_eq!(result.devices.len(), 1);
+    assert!(result.devices[0].present);
+    assert!(result.devices[0].saved.id.starts_with("identity:[\"usb:413d\""));
+    assert_eq!(
+        result.bindings.get(&periph_hal::DeviceKey {
+            backend: "windows.hid".into(),
+            local: "port-a".into(),
+        }),
+        Some(&result.devices[0].saved.id)
+    );
+    assert_eq!(
+        result.bindings.get(&periph_hal::DeviceKey {
+            backend: "windows.hid".into(),
+            local: "port-b".into(),
+        }),
+        Some(&result.devices[0].saved.id)
+    );
+}
+
+#[test]
+fn cross_port_personality_switching_keeps_single_gamepad() {
+    let active = gamepad("port-a", 0x2104, "423bca92863cba8d");
+    let first = model::merge_snapshot(&[], &snapshot(vec![active], &["windows.hid"])).devices;
+    assert_eq!(first.len(), 1);
+
+    // Controller moved to charging cable on port-b:
+    let docked = gamepad("port-b", 0x2106, "");
+    let second = model::merge_snapshot(&first, &snapshot(vec![docked], &["windows.hid"])).devices;
+    assert_eq!(second.len(), 1);
+    assert!(second[0].present);
+    assert_eq!(second[0].saved.id, first[0].saved.id);
+}
+
+#[test]
+fn different_gamepads_with_distinct_uids_stay_separate() {
+    let first = gamepad("port-1", 0x2104, "423bca92863cba8d");
+    let second = gamepad("port-2", 0x2104, "aabbccddeeff0011");
+    let result = model::merge_snapshot(&[], &snapshot(vec![first, second], &["windows.hid"]));
+    assert_eq!(result.devices.len(), 2);
+    assert_ne!(result.devices[0].saved.id, result.devices[1].saved.id);
 }
