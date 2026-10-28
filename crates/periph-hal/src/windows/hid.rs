@@ -141,8 +141,12 @@ pub fn discovery_report() -> Result<DiscoveryReport, HardwareError> {
         ..DiscoveryReport::default()
     };
     for interfaces in receiver_interfaces(&api).values() {
-        let info = interfaces[0];
-        let Some(adapter) = vendor::ADAPTERS.iter().find(|a| a.matches(info)) else {
+        let Some((adapter, info)) = interfaces.iter().find_map(|&info| {
+            vendor::ADAPTERS
+                .iter()
+                .find(|a| a.matches(info))
+                .map(|&a| (a, info))
+        }) else {
             continue;
         };
         let endpoint = EndpointKey {

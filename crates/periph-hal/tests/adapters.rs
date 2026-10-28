@@ -303,3 +303,153 @@ fn kzzi_lighting_collector_handles_reordering_duplicates_and_short_reads() {
     }
     assert_eq!(collector.push(&pages[0]), Some(profile));
 }
+
+#[test]
+fn inphic_battery_notifications() {
+    // Valid IN9 PRO battery notification (mode 2 = wireless, 85%)
+    let in9_pro = [0x03, 0x95, 0x40, 0x02, 85];
+    assert_eq!(
+        inphic_parse_battery(&in9_pro),
+        Some(InphicBattery {
+            model: InphicModel::In9Pro,
+            mode: 2,
+            level: 85,
+        })
+    );
+
+    // 0% battery is valid
+    let in9_pure_0 = [0x03, 0x90, 0x40, 0x02, 0];
+    assert_eq!(
+        inphic_parse_battery(&in9_pure_0),
+        Some(InphicBattery {
+            model: InphicModel::In9Pure,
+            mode: 2,
+            level: 0,
+        })
+    );
+
+    // 100% battery (mode 3 = wired/charging)
+    let in10_100 = [0x03, 0x93, 0x40, 0x03, 100];
+    assert_eq!(
+        inphic_parse_battery(&in10_100),
+        Some(InphicBattery {
+            model: InphicModel::In10,
+            mode: 3,
+            level: 100,
+        })
+    );
+
+    // Bare frame without leading 0x03 report id
+    let bare = [0x95, 0x40, 0x02, 75];
+    assert_eq!(
+        inphic_parse_battery(&bare),
+        Some(InphicBattery {
+            model: InphicModel::In9Pro,
+            mode: 2,
+            level: 75,
+        })
+    );
+
+    // Level > 100 is discarded
+    assert_eq!(inphic_parse_battery(&[0x03, 0x95, 0x40, 0x02, 101]), None);
+
+    // Unknown tag is rejected
+    assert_eq!(inphic_parse_battery(&[0x03, 0x88, 0x40, 0x02, 50]), None);
+
+    // Wrong subcommand is rejected
+    assert_eq!(inphic_parse_battery(&[0x03, 0x95, 0x10, 0x02, 50]), None);
+
+    // Truncated frames are rejected
+    assert_eq!(inphic_parse_battery(&[0x03, 0x95, 0x40, 0x02]), None);
+    assert_eq!(inphic_parse_battery(&[]), None);
+}
+
+#[test]
+fn inphic_dpi_notifications_and_frame_validation() {
+    // Stage notifications 1..=8
+    assert_eq!(
+        inphic_parse_dpi_stage(&[0x03, 0x95, 0x10, 1]),
+        Some((InphicModel::In9Pro, 1))
+    );
+    assert_eq!(
+        inphic_parse_dpi_stage(&[0x03, 0x90, 0x10, 4]),
+        Some((InphicModel::In9Pure, 4))
+    );
+    assert_eq!(
+        inphic_parse_dpi_stage(&[0x03, 0x93, 0x10, 8]),
+        Some((InphicModel::In10, 8))
+    );
+
+    // Stage 0 and 9 rejected
+    assert_eq!(inphic_parse_dpi_stage(&[0x03, 0x95, 0x10, 0]), None);
+    assert_eq!(inphic_parse_dpi_stage(&[0x03, 0x95, 0x10, 9]), None);
+
+    // Construct a synthetic 56-byte DPI frame: 04 38 01 ... [50..52] sum16
+    let mut frame = [0u8; 56];
+    frame[0] = 0x04;
+    frame[1] = 0x38;
+    frame[2] = 0x01;
+    // fill some payload in bytes 3..50
+    for (idx, slot) in frame[3..50].iter_mut().enumerate() {
+        *slot = ((idx + 3) as u8).wrapping_mul(7);
+    }
+    let sum = inphic_dpi_sum16(&frame);
+    frame[50..52].copy_from_slice(&sum.to_le_bytes());
+
+    assert!(inphic_validate_dpi_frame(&frame));
+
+    // Corrupt one byte
+    let mut corrupt = frame;
+    corrupt[10] ^= 1;
+    assert!(!inphic_validate_dpi_frame(&corrupt));
+
+    // Corrupt checksum byte
+    let mut bad_sum = frame;
+    bad_sum[50] ^= 1;
+    assert!(!inphic_validate_dpi_frame(&bad_sum));
+
+    // Wrong length
+    assert!(!inphic_validate_dpi_frame(&frame[..55]));
+}
+
+#[test]
+fn hidpp_raw_index_and_dpi_parsing() {
+    // 0x11, device=1, feature=0 (Root), software_id=0x0B, index=0 (absent)
+    let reply_absent = [
+        0x11, 0x01, 0x00, 0x0b, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(hidpp_feature_index_raw(&reply_absent, 1), Some(0));
+    assert_eq!(hidpp_feature_index(&reply_absent, 1), None);
+
+    // Index = 0x07 (present)
+    let reply_present = [
+        0x11, 0x01, 0x00, 0x0b, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(hidpp_feature_index_raw(&reply_present, 1), Some(7));
+    assert_eq!(hidpp_feature_index(&reply_present, 1), Some(7));
+
+    // 0x2201 fn 2 DPI parse: index=7, current=1600 (0x0640), default=800 (0x0320)
+    let mut dpi_2201_rep = [0u8; 20];
+    dpi_2201_rep[0] = 0x11;
+    dpi_2201_rep[1] = 1;
+    dpi_2201_rep[2] = 7;
+    dpi_2201_rep[3] = (2 << 4) | 0x0b;
+    dpi_2201_rep[4] = 0; // sensor 0
+    dpi_2201_rep[5..7].copy_from_slice(&1600u16.to_be_bytes());
+    dpi_2201_rep[7..9].copy_from_slice(&800u16.to_be_bytes());
+    assert_eq!(
+        hidpp_parse_dpi_0x2201(&dpi_2201_rep, 1, 7),
+        Some((1600, 800))
+    );
+
+    // 0x2202 fn 5 DPI parse: index=8, current=3200 (0x0C80)
+    let mut dpi_2202_rep = [0u8; 20];
+    dpi_2202_rep[0] = 0x11;
+    dpi_2202_rep[1] = 1;
+    dpi_2202_rep[2] = 8;
+    dpi_2202_rep[3] = (5 << 4) | 0x0b;
+    dpi_2202_rep[4] = 0;
+    dpi_2202_rep[5..7].copy_from_slice(&3200u16.to_be_bytes());
+    assert_eq!(hidpp_parse_dpi_0x2202(&dpi_2202_rep, 1, 8), Some(3200));
+}
+

@@ -753,6 +753,12 @@ pub fn hidpp_ping_reply(report: &[u8], device: u8) -> Option<(u8, u8)> {
     hidpp_reply_ok(report, device, 0x00, HIDPP_PING_ADDRESS).then(|| (report[4], report[5]))
 }
 
+/// GetFeature reply returning the raw index byte if the frame matches.
+/// A value of 0 means the device answered but does not support this feature.
+pub fn hidpp_feature_index_raw(report: &[u8], device: u8) -> Option<u8> {
+    hidpp_reply_ok(report, device, 0x00, HIDPP_SOFTWARE_ID).then(|| report[4])
+}
+
 /// GetFeature replies with the local index, 0 when the device lacks it.
 pub fn hidpp_feature_index(report: &[u8], device: u8) -> Option<u8> {
     hidpp_reply_ok(report, device, 0x00, HIDPP_SOFTWARE_ID)
@@ -851,6 +857,30 @@ pub fn hidpp_name_length(report: &[u8], device: u8, index: u8) -> Option<usize> 
 
 pub fn hidpp_name_text(report: &[u8], device: u8, index: u8) -> Option<&[u8]> {
     hidpp_reply_ok(report, device, index, (1 << 4) | HIDPP_SOFTWARE_ID).then(|| &report[4..])
+}
+
+pub const HIDPP_FEATURE_ADJUSTABLE_DPI: u16 = 0x2201;
+pub const HIDPP_FEATURE_EXTENDED_ADJUSTABLE_DPI: u16 = 0x2202;
+
+/// Parse 0x2201 fn 2 reply: (current_dpi, default_dpi).
+/// Reply payload: report[4] = sensor_idx, report[5..7] = current_dpi BE, report[7..9] = default_dpi BE.
+pub fn hidpp_parse_dpi_0x2201(report: &[u8], device: u8, index: u8) -> Option<(u16, u16)> {
+    if !hidpp_reply_ok(report, device, index, (2 << 4) | HIDPP_SOFTWARE_ID) || report.len() < 9 {
+        return None;
+    }
+    let current = u16::from_be_bytes([report[5], report[6]]);
+    let default = u16::from_be_bytes([report[7], report[8]]);
+    (current > 0).then_some((current, default))
+}
+
+/// Parse 0x2202 fn 5 reply: current_dpi.
+/// Reply payload: report[4] = sensor_idx, report[5..7] = current_dpi BE.
+pub fn hidpp_parse_dpi_0x2202(report: &[u8], device: u8, index: u8) -> Option<u16> {
+    if !hidpp_reply_ok(report, device, index, (5 << 4) | HIDPP_SOFTWARE_ID) || report.len() < 7 {
+        return None;
+    }
+    let current = u16::from_be_bytes([report[5], report[6]]);
+    (current > 0).then_some(current)
 }
 
 // Unifying-family receiver registers; the Lightspeed receiver speaks the same
@@ -999,3 +1029,130 @@ pub fn ikf_battery(report: &[u8]) -> Option<u8> {
     let level = report[10];
     ((1..=100).contains(&level)).then_some(level)
 }
+
+// Inphic 2.4G mouse protocol over vendor collections (VID 0x1D57).
+// Reverse-engineered from INPHIC HUB (INPHIC.exe, hiddriver.dll).
+// Notification report: report ID 0x03, 5 bytes:
+// [0] = 0x03
+// [1] = tag (0x95: IN9 PRO, 0x90: IN9 PURE, 0x93: IN10)
+// [2] = subcmd (0x40: battery, 0x10: DPI switch, 0x20: rate, 0x70: light, 0x80: profile)
+// [3..] = parameters
+pub const INPHIC_TAG_IN9_PRO: u8 = 0x95;
+pub const INPHIC_TAG_IN9_PURE: u8 = 0x90;
+pub const INPHIC_TAG_IN10: u8 = 0x93;
+
+pub const INPHIC_SUBCMD_DPI: u8 = 0x10;
+pub const INPHIC_SUBCMD_RATE: u8 = 0x20;
+pub const INPHIC_SUBCMD_BATTERY: u8 = 0x40;
+pub const INPHIC_SUBCMD_TRANSFER_END: u8 = 0x50;
+pub const INPHIC_SUBCMD_LIGHTING: u8 = 0x70;
+pub const INPHIC_SUBCMD_PROFILE: u8 = 0x80;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InphicModel {
+    In9Pro,
+    In9Pure,
+    In10,
+}
+
+impl InphicModel {
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            INPHIC_TAG_IN9_PRO => Some(Self::In9Pro),
+            INPHIC_TAG_IN9_PURE => Some(Self::In9Pure),
+            INPHIC_TAG_IN10 => Some(Self::In10),
+            _ => None,
+        }
+    }
+
+    pub fn tag(self) -> u8 {
+        match self {
+            Self::In9Pro => INPHIC_TAG_IN9_PRO,
+            Self::In9Pure => INPHIC_TAG_IN9_PURE,
+            Self::In10 => INPHIC_TAG_IN10,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::In9Pro => "英菲克 IN9 PRO",
+            Self::In9Pure => "英菲克 IN9 PURE",
+            Self::In10 => "英菲克 IN10",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InphicBattery {
+    pub model: InphicModel,
+    pub mode: u8,
+    pub level: u8,
+}
+
+/// Parse Inphic report 0x03 battery notification.
+/// - Requires report[0] == 0x03 (or bare 4-byte payload without report id).
+/// - Validates tag matches IN9 PRO (0x95), IN9 PURE (0x90), or IN10 (0x93).
+/// - Validates subcmd == 0x40.
+/// - Validates level in 0..=100 (>100 discarded per spec).
+pub fn inphic_parse_battery(report: &[u8]) -> Option<InphicBattery> {
+    let (tag, subcmd, mode, level) = if report.len() >= 5 && report[0] == 0x03 {
+        (report[1], report[2], report[3], report[4])
+    } else if report.len() >= 4 && InphicModel::from_tag(report[0]).is_some() && report[1] == INPHIC_SUBCMD_BATTERY {
+        (report[0], report[1], report[2], report[3])
+    } else {
+        return None;
+    };
+
+    let model = InphicModel::from_tag(tag)?;
+    if subcmd != INPHIC_SUBCMD_BATTERY || level > 100 {
+        return None;
+    }
+    Some(InphicBattery { model, mode, level })
+}
+
+/// Parse Inphic report 0x03 DPI stage notification.
+/// Returns (model, stage 1..=8).
+pub fn inphic_parse_dpi_stage(report: &[u8]) -> Option<(InphicModel, u8)> {
+    let (tag, subcmd, stage) = if report.len() >= 4 && report[0] == 0x03 {
+        (report[1], report[2], report[3])
+    } else if report.len() >= 3 && InphicModel::from_tag(report[0]).is_some() && report[1] == INPHIC_SUBCMD_DPI {
+        (report[0], report[1], report[2])
+    } else {
+        return None;
+    };
+
+    let model = InphicModel::from_tag(tag)?;
+    if subcmd != INPHIC_SUBCMD_DPI || !(1..=8).contains(&stage) {
+        return None;
+    }
+    Some((model, stage))
+}
+
+/// Calculate 16-bit additive checksum for Inphic 56-byte DPI frame:
+/// sum over bytes [3..50] (47 bytes).
+pub fn inphic_dpi_sum16(frame: &[u8]) -> u16 {
+    if frame.len() < 50 {
+        return 0;
+    }
+    frame[3..50]
+        .iter()
+        .fold(0u16, |acc, &b| acc.wrapping_add(b as u16))
+}
+
+/// Validate Inphic 56-byte discrete DPI frame (Report 0x04, cmd 0x38).
+/// Byte 0: 0x04
+/// Byte 1: 0x38 (DPI command)
+/// Byte 2: 0x01
+/// Byte 50..52: sum16([3..50]) little-endian
+pub fn inphic_validate_dpi_frame(frame: &[u8]) -> bool {
+    if frame.len() != 56 {
+        return false;
+    }
+    if frame[0] != 0x04 || frame[1] != 0x38 || frame[2] != 0x01 {
+        return false;
+    }
+    let expected = inphic_dpi_sum16(frame);
+    let actual = u16::from_le_bytes([frame[50], frame[51]]);
+    expected == actual
+}
+

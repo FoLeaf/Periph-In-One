@@ -209,10 +209,14 @@ fn probe(
             }
             continue;
         }
-        let battery = if sample_battery {
-            hidpp_battery(&tunnel_reader, &tunnel_writer, &mut buffer, slot)?
+        let (battery, unsupported, issue) = if sample_battery {
+            match hidpp_battery(&tunnel_reader, &tunnel_writer, &mut buffer, slot)? {
+                HidppBatteryOutcome::Value(level) => (Some(level), false, None),
+                HidppBatteryOutcome::Unsupported => (None, true, None),
+                HidppBatteryOutcome::Unavailable(err) => (None, false, Some(err)),
+            }
         } else {
-            None
+            (None, false, None)
         };
         let name = if !sample_battery {
             hidpp_name(&tunnel_reader, &tunnel_writer, &mut buffer, slot).unwrap_or_default()
@@ -221,9 +225,8 @@ fn probe(
         };
         outcomes.push(Outcome {
             battery,
-            issue: (sample_battery && battery.is_none()).then(|| {
-                HardwareError::new(ErrorKind::Unavailable, "device reported no battery level")
-            }),
+            unsupported,
+            issue,
             connection: Connection::Connected,
             hardware_name: (!name.is_empty()).then_some(name),
             slot: Some(slot),
@@ -293,16 +296,22 @@ fn hidpp_register(
     Ok(None)
 }
 
+enum HidppBatteryOutcome {
+    Value(u8),
+    Unsupported,
+    Unavailable(HardwareError),
+}
+
 /// Unified Battery (0x1004), Battery Level Status (0x1000), then Battery
-/// Voltage (0x1001) — Solaar's preference order for HID++ 2.0 devices; the
-/// G502 Lightspeed only carries the voltage feature, whose millivolt reading
-/// is mapped to a percentage through the discharge curve.
+/// Voltage (0x1001) - Solaar's preference order for HID++ 2.0 devices.
+/// If all three features are definitively absent on the hardware (GetFeature returns 0),
+/// returns Unsupported. If queries fail or time out, returns Unavailable.
 fn hidpp_battery(
     reader: &HidDevice,
     writer: &HidDevice,
     buffer: &mut [u8; 256],
     device: u8,
-) -> Result<Option<u8>, HardwareError> {
+) -> Result<HidppBatteryOutcome, HardwareError> {
     for (feature, function, parse) in [
         (
             protocol::HIDPP_FEATURE_UNIFIED_BATTERY,
@@ -322,23 +331,42 @@ fn hidpp_battery(
     ] {
         drain(reader);
         send(writer, &protocol::hidpp_get_feature(device, feature))?;
-        let index = read_matching(reader, buffer, Duration::from_millis(400), |report| {
-            protocol::hidpp_feature_index(report, device)
+        let raw_index = read_matching(reader, buffer, Duration::from_millis(400), |report| {
+            protocol::hidpp_feature_index_raw(report, device)
         })?;
-        let Some(index) = index else { continue };
-        drain(reader);
-        send(
-            writer,
-            &protocol::hidpp_feature_call(device, index, function),
-        )?;
-        let level = read_matching(reader, buffer, Duration::from_millis(400), |report| {
-            parse(report, device, index)
-        })?;
-        if level.is_some() {
-            return Ok(level);
+        match raw_index {
+            Some(0) => {
+                // Feature explicitly reported as unsupported by the device firmware
+                continue;
+            }
+            Some(index) => {
+                drain(reader);
+                send(
+                    writer,
+                    &protocol::hidpp_feature_call(device, index, function),
+                )?;
+                let level = read_matching(reader, buffer, Duration::from_millis(400), |report| {
+                    parse(report, device, index)
+                })?;
+                if let Some(level) = level {
+                    return Ok(HidppBatteryOutcome::Value(level));
+                }
+                return Ok(HidppBatteryOutcome::Unavailable(HardwareError::new(
+                    ErrorKind::Unavailable,
+                    "device feature call returned no valid battery reading",
+                )));
+            }
+            None => {
+                // Communication timeout or unrecognized frame: cannot confirm Unsupported
+                return Ok(HidppBatteryOutcome::Unavailable(HardwareError::new(
+                    ErrorKind::Timeout,
+                    "battery feature lookup timed out",
+                )));
+            }
         }
     }
-    Ok(None)
+    // All queried battery features were explicitly reported as absent (index 0)
+    Ok(HidppBatteryOutcome::Unsupported)
 }
 
 /// Device Name (0x0003): one length call plus fixed-size text chunks. A

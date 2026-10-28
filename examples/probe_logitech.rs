@@ -144,19 +144,19 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
         println!("  [Feature 0x0003] 固件/型号信息存在 (index = 0x{idx_0003:02X})");
         // fn2: GetModelId
         let cmd = [0x11, slot, idx_0003, (2 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400)) {
-            if rep.len() >= 6 && rep[1] == slot {
-                let wpid = u16::from_be_bytes([rep[4], rep[5]]);
-                println!("    -> Model ID / WPID: 0x{wpid:04X}");
-            }
+        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
+            && rep.len() >= 6 && rep[1] == slot
+        {
+            let wpid = u16::from_be_bytes([rep[4], rep[5]]);
+            println!("    -> Model ID / WPID: 0x{wpid:04X}");
         }
         // fn3: GetExtendedModelId
         let cmd_ext = [0x11, slot, idx_0003, (3 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_ext, Duration::from_millis(400)) {
-            if rep.len() >= 6 && rep[1] == slot {
-                let ext_id = u16::from_be_bytes([rep[4], rep[5]]);
-                println!("    -> Extended Model ID: 0x{ext_id:04X}");
-            }
+        if let Some(rep) = query(long_device, long_device, &cmd_ext, Duration::from_millis(400))
+            && rep.len() >= 6 && rep[1] == slot
+        {
+            let ext_id = u16::from_be_bytes([rep[4], rep[5]]);
+            println!("    -> Extended Model ID: 0x{ext_id:04X}");
         }
     } else {
         println!("  [Feature 0x0003] 未实现");
@@ -167,28 +167,28 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
         println!("  [Feature 0x0005] 设备名与类型存在 (index = 0x{idx_0005:02X})");
         // fn0: GetNameCount
         let mut name = String::new();
-        let cmd = [0x11, slot, idx_0005, (0 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400)) {
-            if rep.len() >= 5 {
-                let len = rep[4] as usize;
-                // fn1: GetDeviceName chunks
-                let mut offset = 0;
-                while offset < len {
-                    let cmd_name = [0x11, slot, idx_0005, (1 << 4) | 0x0b, offset as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-                    if let Some(chunk) = query(long_device, long_device, &cmd_name, Duration::from_millis(400)) {
-                        if chunk.len() >= 5 {
-                            let available = &chunk[4..];
-                            let take = (len - offset).min(available.len());
-                            if let Ok(s) = std::str::from_utf8(&available[..take]) {
-                                name.push_str(s);
-                            }
-                            offset += take;
-                        } else {
-                            break;
+        let cmd = [0x11, slot, idx_0005, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
+            && rep.len() >= 5
+        {
+            let len = rep[4] as usize;
+            // fn1: GetDeviceName chunks
+            let mut offset = 0;
+            while offset < len {
+                let cmd_name = [0x11, slot, idx_0005, (1 << 4) | 0x0b, offset as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                if let Some(chunk) = query(long_device, long_device, &cmd_name, Duration::from_millis(400)) {
+                    if chunk.len() >= 5 {
+                        let available = &chunk[4..];
+                        let take = (len - offset).min(available.len());
+                        if let Ok(s) = std::str::from_utf8(&available[..take]) {
+                            name.push_str(s);
                         }
+                        offset += take;
                     } else {
                         break;
                     }
+                } else {
+                    break;
                 }
             }
         }
@@ -198,11 +198,11 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
 
         // fn2: GetDeviceType
         let cmd_type = [0x11, slot, idx_0005, (2 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_type, Duration::from_millis(400)) {
-            if rep.len() >= 5 {
-                let dev_type = rep[4];
-                println!("    -> 设备类型判定: 0x{dev_type:02X} ({})", decode_device_type(dev_type));
-            }
+        if let Some(rep) = query(long_device, long_device, &cmd_type, Duration::from_millis(400))
+            && rep.len() >= 5
+        {
+            let dev_type = rep[4];
+            println!("    -> 设备类型判定: 0x{dev_type:02X} ({})", decode_device_type(dev_type));
         }
     } else {
         println!("  [Feature 0x0005] 未实现");
@@ -213,34 +213,34 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     if let Some(idx) = get_feature_index(0x1004) {
         println!("    -> 发现 Unified Battery (0x1004, index 0x{idx:02X})");
         let cmd = [0x11, slot, idx, (1 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400)) {
-            if rep.len() >= 6 {
-                let soc = rep[4];
-                let approx = rep[5];
-                println!("       电量应答: SOC={soc}%, 粗略档={approx}");
-            }
+        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
+            && rep.len() >= 6
+        {
+            let soc = rep[4];
+            let approx = rep[5];
+            println!("       电量应答: SOC={soc}%, 粗略档={approx}");
         }
     }
     if let Some(idx) = get_feature_index(0x1000) {
         println!("    -> 发现 Battery Level Status (0x1000, index 0x{idx:02X})");
-        let cmd = [0x11, slot, idx, (0 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400)) {
-            if rep.len() >= 5 {
-                let level = rep[4];
-                println!("       电量状态: 级别={level}");
-            }
+        let cmd = [0x11, slot, idx, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
+            && rep.len() >= 5
+        {
+            let level = rep[4];
+            println!("       电量状态: 级别={level}");
         }
     }
     if let Some(idx) = get_feature_index(0x1001) {
         println!("    -> 发现 Battery Voltage (0x1001, index 0x{idx:02X})");
-        let cmd = [0x11, slot, idx, (0 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400)) {
-            if rep.len() >= 7 {
-                let mv = u16::from_be_bytes([rep[4], rep[5]]);
-                let flags = rep[6];
-                let charging = flags & 0x80 != 0;
-                println!("       电压应答: {mv} mV, 充电标志={charging}");
-            }
+        let cmd = [0x11, slot, idx, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
+            && rep.len() >= 7
+        {
+            let mv = u16::from_be_bytes([rep[4], rep[5]]);
+            let flags = rep[6];
+            let charging = flags & 0x80 != 0;
+            println!("       电压应答: {mv} mV, 充电标志={charging}");
         }
     }
 

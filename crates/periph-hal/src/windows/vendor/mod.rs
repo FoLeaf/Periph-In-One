@@ -7,6 +7,7 @@ mod aula;
 mod bigbigwon;
 mod darkrim;
 mod ikf;
+mod inphic;
 mod kzzi;
 mod logitech;
 
@@ -73,6 +74,7 @@ pub const ADAPTERS: &[&dyn VendorAdapter] = &[
     &atk_v2_dongle::AtkV2Dongle,
     &darkrim::DarkrimHeadset,
     &ikf::IkfHeadset,
+    &inphic::InphicMouse,
     &kzzi::KzziKeyboard,
     &bigbigwon::BigbigwonGamepad,
     &logitech::LogitechReceiver,
