@@ -384,17 +384,30 @@ fn inphic_dpi_notifications_and_frame_validation() {
     assert_eq!(inphic_parse_dpi_stage(&[0x03, 0x95, 0x10, 0]), None);
     assert_eq!(inphic_parse_dpi_stage(&[0x03, 0x95, 0x10, 9]), None);
 
-    // Construct a synthetic 56-byte DPI frame: 04 38 01 ... [50..52] sum16
-    let mut frame = [0u8; 56];
-    frame[0] = 0x04;
-    frame[1] = 0x38;
-    frame[2] = 0x01;
-    // fill some payload in bytes 3..50
-    for (idx, slot) in frame[3..50].iter_mut().enumerate() {
-        *slot = ((idx + 3) as u8).wrapping_mul(7);
-    }
-    let sum = inphic_dpi_sum16(&frame);
-    frame[50..52].copy_from_slice(&sum.to_le_bytes());
+    // Construct a synthetic 56-byte DPI frame: 04 38 01 ... [50..52] sum16 (big-endian)
+    let config = InphicDpiConfig {
+        stages: [16, 32, 64, 130, 260, 520, 10, 10],
+        enabled: [true, true, true, true, true, true, false, false],
+        active_stage: 2,
+        colors: [[0, 0, 0]; 8],
+        ripple: 0,
+        angle_snap: 0,
+        motion_sync: 0,
+    };
+    let frame = inphic_build_dpi_frame(&config);
+    assert_eq!(frame.len(), 56);
+    assert_eq!(&frame[0..3], &[0x04, 0x38, 0x01]);
+    assert_eq!(frame[5], 0x3F); // 6 stages enabled: 0b0011_1111 = 0x3F
+    assert_eq!(
+        &frame[8..16],
+        &[0x0F, 0x1F, 0x3F, 0x81, 0x03, 0x07, 0x09, 0x09]
+    );
+    assert_eq!(
+        &frame[16..24],
+        &[0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00]
+    );
+    assert_eq!(frame[24], 2);
+    assert_eq!(frame[49], 0x01);
 
     assert!(inphic_validate_dpi_frame(&frame));
 
@@ -451,4 +464,19 @@ fn hidpp_raw_index_and_dpi_parsing() {
     dpi_2202_rep[4] = 0;
     dpi_2202_rep[5..7].copy_from_slice(&3200u16.to_be_bytes());
     assert_eq!(hidpp_parse_dpi_0x2202(&dpi_2202_rep, 1, 8), Some(3200));
+
+    // 0x2201 SetDpi (fn 3)
+    let set_2201 = hidpp_set_dpi_0x2201(1, 7, 1600);
+    assert_eq!(set_2201[0..4], [0x11, 1, 7, (3 << 4) | 0x0b]);
+    assert_eq!(set_2201[4], 0);
+    assert_eq!(&set_2201[5..7], &1600u16.to_be_bytes());
+    assert!(hidpp_set_dpi_ok(&set_2201, 1, 7, 3));
+    assert!(!hidpp_set_dpi_ok(&set_2201, 2, 7, 3));
+
+    // 0x2202 SetDpi (fn 6)
+    let set_2202 = hidpp_set_dpi_0x2202(1, 8, 3200);
+    assert_eq!(set_2202[0..4], [0x11, 1, 8, (6 << 4) | 0x0b]);
+    assert_eq!(set_2202[4], 0);
+    assert_eq!(&set_2202[5..7], &3200u16.to_be_bytes());
+    assert!(hidpp_set_dpi_ok(&set_2202, 1, 8, 6));
 }

@@ -883,6 +883,26 @@ pub fn hidpp_parse_dpi_0x2202(report: &[u8], device: u8, index: u8) -> Option<u1
     (current > 0).then_some(current)
 }
 
+/// 0x2201 SetDpi (fn 3): [0x11, device, index, (3 << 4) | 0x0B, sensor_idx=0, dpi_hi, dpi_lo, 0...]
+pub fn hidpp_set_dpi_0x2201(device: u8, index: u8, dpi: u16) -> [u8; 20] {
+    let mut frame = hidpp_feature_call(device, index, 3);
+    frame[4] = 0; // sensor index
+    frame[5..7].copy_from_slice(&dpi.to_be_bytes());
+    frame
+}
+
+/// 0x2202 SetDpi (fn 6): [0x11, device, index, (6 << 4) | 0x0B, sensor_idx=0, dpi_hi, dpi_lo, 0...]
+pub fn hidpp_set_dpi_0x2202(device: u8, index: u8, dpi: u16) -> [u8; 20] {
+    let mut frame = hidpp_feature_call(device, index, 6);
+    frame[4] = 0; // sensor index
+    frame[5..7].copy_from_slice(&dpi.to_be_bytes());
+    frame
+}
+
+pub fn hidpp_set_dpi_ok(report: &[u8], device: u8, index: u8, function: u8) -> bool {
+    hidpp_reply_ok(report, device, index, (function << 4) | HIDPP_SOFTWARE_ID)
+}
+
 // Unifying-family receiver registers; the Lightspeed receiver speaks the same
 // HID++ 1.0 register protocol (cross-checked against Solaar and OpenLogi,
 // which both classify 046d:C539 as Unifying-compatible). Requests go out as
@@ -1145,11 +1165,85 @@ pub fn inphic_dpi_sum16(frame: &[u8]) -> u16 {
         .fold(0u16, |acc, &b| acc.wrapping_add(b as u16))
 }
 
+/// Inphic 8-slot DPI table configuration structure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InphicDpiConfig {
+    pub stages: [u16; 8],
+    pub enabled: [bool; 8],
+    pub active_stage: u8, // 1..=8
+    pub colors: [[u8; 3]; 8],
+    pub ripple: u8,
+    pub angle_snap: u8,
+    pub motion_sync: u8,
+}
+
+impl Default for InphicDpiConfig {
+    fn default() -> Self {
+        Self {
+            stages: [800, 1200, 1600, 2400, 3200, 6400, 12800, 26000],
+            enabled: [true, true, true, true, false, false, false, false],
+            active_stage: 1,
+            colors: [[0, 0, 0]; 8],
+            ripple: 0,
+            angle_snap: 0,
+            motion_sync: 0,
+        }
+    }
+}
+
+/// Build Inphic 56-byte discrete DPI frame (Report 0x04, cmd 0x38).
+/// Offsets per reverse-engineering documentation:
+/// [0..2]: 04 38
+/// [2]: 01
+/// [3]: angle_snap
+/// [4]: ripple
+/// [5]: enable bitmap
+/// [6]: angle_snap
+/// [7]: motion_sync
+/// [8..16]: (dpi - 1) low bytes
+/// [16..24]: (dpi - 1) high bytes
+/// [24]: active stage 1..=8
+/// [25..49]: 8 * 3 RGB bytes
+/// [49]: 01
+/// [50..52]: sum16([3..50]) big-endian
+pub fn inphic_build_dpi_frame(config: &InphicDpiConfig) -> [u8; 56] {
+    let mut frame = [0u8; 56];
+    frame[0] = 0x04;
+    frame[1] = 0x38;
+    frame[2] = 0x01;
+    frame[3] = config.angle_snap;
+    frame[4] = config.ripple;
+    let mut enable_bits = 0u8;
+    for (i, &en) in config.enabled.iter().enumerate() {
+        if en {
+            enable_bits |= 1 << i;
+        }
+    }
+    frame[5] = enable_bits;
+    frame[6] = config.angle_snap;
+    frame[7] = config.motion_sync;
+    for (i, &dpi) in config.stages.iter().enumerate() {
+        let raw = dpi.saturating_sub(1);
+        frame[8 + i] = (raw & 0xff) as u8;
+        frame[16 + i] = (raw >> 8) as u8;
+    }
+    frame[24] = config.active_stage.clamp(1, 8);
+    for (i, rgb) in config.colors.iter().enumerate() {
+        frame[25 + i * 3] = rgb[0];
+        frame[26 + i * 3] = rgb[1];
+        frame[27 + i * 3] = rgb[2];
+    }
+    frame[49] = 0x01;
+    let sum = inphic_dpi_sum16(&frame);
+    frame[50..52].copy_from_slice(&sum.to_be_bytes());
+    frame
+}
+
 /// Validate Inphic 56-byte discrete DPI frame (Report 0x04, cmd 0x38).
 /// Byte 0: 0x04
 /// Byte 1: 0x38 (DPI command)
 /// Byte 2: 0x01
-/// Byte 50..52: sum16([3..50]) little-endian
+/// Byte 50..52: sum16([3..50]) big-endian
 pub fn inphic_validate_dpi_frame(frame: &[u8]) -> bool {
     if frame.len() != 56 {
         return false;
@@ -1158,6 +1252,6 @@ pub fn inphic_validate_dpi_frame(frame: &[u8]) -> bool {
         return false;
     }
     let expected = inphic_dpi_sum16(frame);
-    let actual = u16::from_le_bytes([frame[50], frame[51]]);
+    let actual = u16::from_be_bytes([frame[50], frame[51]]);
     expected == actual
 }
