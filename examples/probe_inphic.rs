@@ -72,7 +72,9 @@ fn main() {
     }
 
     if endpoints.is_empty() {
-        println!("未检测到英菲克接收器或鼠标端点（1D57:FA60 usage_page 0x0A/0x0B 或 1D57:FA65 FF00:0001）");
+        println!(
+            "未检测到英菲克接收器或鼠标端点（1D57:FA60 usage_page 0x0A/0x0B 或 1D57:FA65 FF00:0001）"
+        );
         return;
     }
 
@@ -84,7 +86,9 @@ fn main() {
             (PID_FA65, 0xff00, 0x0001) => "第二端点 (FF00:0001)",
             _ => "匹配端点",
         };
-        println!("  [{idx}] PID: {pid:04X}, UsagePage: 0x{up:04X}, Usage: 0x{u:04X}, 接口号: {iface} ({desc})");
+        println!(
+            "  [{idx}] PID: {pid:04X}, UsagePage: 0x{up:04X}, Usage: 0x{u:04X}, 接口号: {iface} ({desc})"
+        );
     }
 
     // Open notification endpoints (usage_page 0x0A on FA60, or FF00:0001 on FA65)
@@ -139,15 +143,21 @@ fn main() {
                             } else {
                                 format!("{level} (超限无效，丢弃)")
                             };
-                            println!("  -> 电量通知 [{model} (tag 0x{tag:02X})]: 模式 0x{mode:02X} ({mode_desc}), 电量: {level_str}");
+                            println!(
+                                "  -> 电量通知 [{model} (tag 0x{tag:02X})]: 模式 0x{mode:02X} ({mode_desc}), 电量: {level_str}"
+                            );
                         }
                         0x10 => {
                             let stage = frame[3];
-                            println!("  -> DPI 切换通知 [{model} (tag 0x{tag:02X})]: 当前档位 {stage} (1..=8)");
+                            println!(
+                                "  -> DPI 切换通知 [{model} (tag 0x{tag:02X})]: 当前档位 {stage} (1..=8)"
+                            );
                         }
                         0x20 => {
                             let rate = frame[3];
-                            println!("  -> 回报率通知 [{model} (tag 0x{tag:02X})]: 原始值 0x{rate:02X}");
+                            println!(
+                                "  -> 回报率通知 [{model} (tag 0x{tag:02X})]: 原始值 0x{rate:02X}"
+                            );
                         }
                         0x50 => {
                             println!("  -> 传输结束标志 [{model} (tag 0x{tag:02X})]");
@@ -158,7 +168,9 @@ fn main() {
                         }
                         0x80 => {
                             let profile = frame[3];
-                            println!("  -> 配置档切换通知 [{model} (tag 0x{tag:02X})]: 配置档 {profile} (1..=5)");
+                            println!(
+                                "  -> 配置档切换通知 [{model} (tag 0x{tag:02X})]: 配置档 {profile} (1..=5)"
+                            );
                         }
                         other => {
                             println!("  -> 其他子命令 0x{other:02X} [{model} (tag 0x{tag:02X})]");

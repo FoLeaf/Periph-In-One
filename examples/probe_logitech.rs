@@ -54,7 +54,12 @@ fn dump(label: &str, frame: &[u8]) {
 }
 
 /// Send one frame, return first matching reply or None.
-fn query(reader: &HidDevice, writer: &HidDevice, frame: &[u8], timeout: Duration) -> Option<Vec<u8>> {
+fn query(
+    reader: &HidDevice,
+    writer: &HidDevice,
+    frame: &[u8],
+    timeout: Duration,
+) -> Option<Vec<u8>> {
     let mut buffer = [0u8; 64];
     while reader.read_timeout(&mut buffer, 10).unwrap_or(0) > 0 {}
     if writer.write(frame).is_err() {
@@ -89,7 +94,12 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
 
     // Ping device: [0x11, slot, 0x00, 0x1B, 0x00, 0x00, 0x42]
     let ping_cmd = [0x11, slot, 0x00, 0x1b, 0x00, 0x00, 0x42];
-    let ping_res = query(long_device, long_device, &ping_cmd, Duration::from_millis(500));
+    let ping_res = query(
+        long_device,
+        long_device,
+        &ping_cmd,
+        Duration::from_millis(500),
+    );
 
     let Some(reply) = ping_res else {
         println!("  槽位 {slot}: 设备离线或未配对 (Ping 无应答)");
@@ -143,17 +153,65 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     if let Some(idx_0003) = get_feature_index(0x0003) {
         println!("  [Feature 0x0003] 固件/型号信息存在 (index = 0x{idx_0003:02X})");
         // fn2: GetModelId
-        let cmd = [0x11, slot, idx_0003, (2 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let cmd = [
+            0x11,
+            slot,
+            idx_0003,
+            (2 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
-            && rep.len() >= 6 && rep[1] == slot
+            && rep.len() >= 6
+            && rep[1] == slot
         {
             let wpid = u16::from_be_bytes([rep[4], rep[5]]);
             println!("    -> Model ID / WPID: 0x{wpid:04X}");
         }
         // fn3: GetExtendedModelId
-        let cmd_ext = [0x11, slot, idx_0003, (3 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_ext, Duration::from_millis(400))
-            && rep.len() >= 6 && rep[1] == slot
+        let cmd_ext = [
+            0x11,
+            slot,
+            idx_0003,
+            (3 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let Some(rep) = query(
+            long_device,
+            long_device,
+            &cmd_ext,
+            Duration::from_millis(400),
+        ) && rep.len() >= 6
+            && rep[1] == slot
         {
             let ext_id = u16::from_be_bytes([rep[4], rep[5]]);
             println!("    -> Extended Model ID: 0x{ext_id:04X}");
@@ -167,7 +225,9 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
         println!("  [Feature 0x0005] 设备名与类型存在 (index = 0x{idx_0005:02X})");
         // fn0: GetNameCount
         let mut name = String::new();
-        let cmd = [0x11, slot, idx_0005, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let cmd = [
+            0x11, slot, idx_0005, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
             && rep.len() >= 5
         {
@@ -175,8 +235,34 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
             // fn1: GetDeviceName chunks
             let mut offset = 0;
             while offset < len {
-                let cmd_name = [0x11, slot, idx_0005, (1 << 4) | 0x0b, offset as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-                if let Some(chunk) = query(long_device, long_device, &cmd_name, Duration::from_millis(400)) {
+                let cmd_name = [
+                    0x11,
+                    slot,
+                    idx_0005,
+                    (1 << 4) | 0x0b,
+                    offset as u8,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ];
+                if let Some(chunk) = query(
+                    long_device,
+                    long_device,
+                    &cmd_name,
+                    Duration::from_millis(400),
+                ) {
                     if chunk.len() >= 5 {
                         let available = &chunk[4..];
                         let take = (len - offset).min(available.len());
@@ -197,12 +283,40 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
         }
 
         // fn2: GetDeviceType
-        let cmd_type = [0x11, slot, idx_0005, (2 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_type, Duration::from_millis(400))
-            && rep.len() >= 5
+        let cmd_type = [
+            0x11,
+            slot,
+            idx_0005,
+            (2 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let Some(rep) = query(
+            long_device,
+            long_device,
+            &cmd_type,
+            Duration::from_millis(400),
+        ) && rep.len() >= 5
         {
             let dev_type = rep[4];
-            println!("    -> 设备类型判定: 0x{dev_type:02X} ({})", decode_device_type(dev_type));
+            println!(
+                "    -> 设备类型判定: 0x{dev_type:02X} ({})",
+                decode_device_type(dev_type)
+            );
         }
     } else {
         println!("  [Feature 0x0005] 未实现");
@@ -212,7 +326,28 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     println!("  -- 正在检查电量特性 --");
     if let Some(idx) = get_feature_index(0x1004) {
         println!("    -> 发现 Unified Battery (0x1004, index 0x{idx:02X})");
-        let cmd = [0x11, slot, idx, (1 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let cmd = [
+            0x11,
+            slot,
+            idx,
+            (1 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
             && rep.len() >= 6
         {
@@ -223,7 +358,9 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     }
     if let Some(idx) = get_feature_index(0x1000) {
         println!("    -> 发现 Battery Level Status (0x1000, index 0x{idx:02X})");
-        let cmd = [0x11, slot, idx, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let cmd = [
+            0x11, slot, idx, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
             && rep.len() >= 5
         {
@@ -233,7 +370,9 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     }
     if let Some(idx) = get_feature_index(0x1001) {
         println!("    -> 发现 Battery Voltage (0x1001, index 0x{idx:02X})");
-        let cmd = [0x11, slot, idx, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let cmd = [
+            0x11, slot, idx, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         if let Some(rep) = query(long_device, long_device, &cmd, Duration::from_millis(400))
             && rep.len() >= 7
         {
@@ -249,13 +388,65 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     if let Some(idx) = get_feature_index(0x2201) {
         println!("    -> 发现 Adjustable DPI (0x2201, index 0x{idx:02X})");
         // fn1: sensor count & DPI list
-        let cmd_list = [0x11, slot, idx, (1 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_list, Duration::from_millis(400)) {
+        let cmd_list = [
+            0x11,
+            slot,
+            idx,
+            (1 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let Some(rep) = query(
+            long_device,
+            long_device,
+            &cmd_list,
+            Duration::from_millis(400),
+        ) {
             dump("       0x2201 fn1 应答:", &rep);
         }
         // fn2: read current DPI
-        let cmd_read = [0x11, slot, idx, (2 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_read, Duration::from_millis(400)) {
+        let cmd_read = [
+            0x11,
+            slot,
+            idx,
+            (2 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let Some(rep) = query(
+            long_device,
+            long_device,
+            &cmd_read,
+            Duration::from_millis(400),
+        ) {
             if rep.len() >= 8 {
                 let current_dpi = u16::from_be_bytes([rep[5], rep[6]]);
                 let default_dpi = u16::from_be_bytes([rep[7], rep[8]]);
@@ -268,13 +459,65 @@ fn probe_slot(long_device: &HidDevice, slot: u8) {
     if let Some(idx) = get_feature_index(0x2202) {
         println!("    -> 发现 Extended Adjustable DPI (0x2202, index 0x{idx:02X})");
         // fn1: capabilities
-        let cmd_caps = [0x11, slot, idx, (1 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_caps, Duration::from_millis(400)) {
+        let cmd_caps = [
+            0x11,
+            slot,
+            idx,
+            (1 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let Some(rep) = query(
+            long_device,
+            long_device,
+            &cmd_caps,
+            Duration::from_millis(400),
+        ) {
             dump("       0x2202 fn1 应答:", &rep);
         }
         // fn5: read current DPI
-        let cmd_read = [0x11, slot, idx, (5 << 4) | 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if let Some(rep) = query(long_device, long_device, &cmd_read, Duration::from_millis(400)) {
+        let cmd_read = [
+            0x11,
+            slot,
+            idx,
+            (5 << 4) | 0x0b,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let Some(rep) = query(
+            long_device,
+            long_device,
+            &cmd_read,
+            Duration::from_millis(400),
+        ) {
             dump("       0x2202 fn5 当前 DPI 应答:", &rep);
         }
     }
@@ -316,7 +559,10 @@ fn main() {
         return;
     };
 
-    println!("发现罗技接收器 PID {pid:04X} ({family:?})，vendor 接口数: {}", found.len());
+    println!(
+        "发现罗技接收器 PID {pid:04X} ({family:?})，vendor 接口数: {}",
+        found.len()
+    );
     let short_device = match api.open_path(short_path) {
         Ok(dev) => dev,
         Err(err) => {
@@ -334,7 +580,12 @@ fn main() {
 
     // 1. 读取接收器配对状态（短寄存器 0x81, register 0x02）
     let reg_req = [0x10, 0xff, 0x81, 0x02, 0x00, 0x00, 0x00];
-    if let Some(reply) = query(&short_device, &short_device, &reg_req, Duration::from_millis(500)) {
+    if let Some(reply) = query(
+        &short_device,
+        &short_device,
+        &reg_req,
+        Duration::from_millis(500),
+    ) {
         if reply.len() >= 5 {
             let paired_count = reply[4];
             println!("接收器配对设备数: {paired_count}");

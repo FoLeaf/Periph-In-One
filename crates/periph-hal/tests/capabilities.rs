@@ -2,6 +2,7 @@ use periph_hal::{
     Backend, Capabilities, Connection, Device, DeviceDescriptor, DeviceFacts, DeviceKey, ErrorKind,
     Hardware, HardwareError,
     battery::{Battery, BatteryReading, BatteryState, Percent, Sample, SampleOrigin},
+    dpi::Dpi,
 };
 use std::sync::{
     Arc,
@@ -189,6 +190,31 @@ fn dpi_and_lighting_capabilities_support_state_manipulation_and_invalidation() {
     dpi.close();
     assert!(dpi.read_stage().is_err());
     assert!(dpi.set_stage(1).is_err());
+
+    // Read-only DPI capability rejects set_stage with Unsupported
+    let ro_stage = Arc::new(AtomicUsize::new(1));
+    let ro_dpi = Dpi::with_writable(
+        vec![800, 1200, 1600, 3200],
+        false,
+        TestDpiController {
+            stage: ro_stage.clone(),
+        },
+    );
+    assert!(!ro_dpi.can_write());
+    assert_eq!(ro_dpi.stages(), &[800, 1200, 1600, 3200]);
+    assert_eq!(ro_dpi.read_stage().unwrap(), Some(1));
+    assert_eq!(
+        ro_dpi.set_stage(2).unwrap_err().kind,
+        ErrorKind::Unsupported
+    );
+    assert_eq!(ro_stage.load(Ordering::SeqCst), 1);
+    assert_eq!(ro_dpi.stage_for_value(800), Some(1));
+    assert_eq!(ro_dpi.stage_for_value(1600), Some(3));
+    assert_eq!(ro_dpi.stage_for_value(1000), None);
+    assert_eq!(ro_dpi.value_for_stage(1), Some(800));
+    assert_eq!(ro_dpi.value_for_stage(4), Some(3200));
+    assert_eq!(ro_dpi.value_for_stage(0), None);
+    assert_eq!(ro_dpi.value_for_stage(5), None);
 
     let light_state = Arc::new(AtomicBool::new(false));
     let light = periph_hal::lighting::Lighting::new(TestLightingController {

@@ -16,8 +16,9 @@
 //! collections and relaying short device frames through them is not
 //! verified.
 
-use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
+    Capabilities, Connection, ErrorKind, HardwareError,
+    dpi::{Dpi, DpiController},
     protocol,
     vendor::{Outcome, TargetCardinality, VendorAdapter},
     windows::{
@@ -26,7 +27,10 @@ use crate::{
     },
 };
 use hidapi::{DeviceInfo, HidApi, HidDevice};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 pub struct LogitechReceiver;
 
@@ -122,6 +126,122 @@ impl VendorAdapter for LogitechReceiver {
             }),
             Err(error) => Outcome::failure(error),
         }
+    }
+
+    fn populate_capabilities(
+        &self,
+        info: &DeviceInfo,
+        slot: Option<u8>,
+        lock: Arc<Mutex<()>>,
+        capabilities: &mut Capabilities,
+    ) {
+        let slot = slot.unwrap_or(1);
+        let presets = vec![800, 1200, 1600, 3200];
+        let _ = capabilities.insert(
+            "main",
+            Dpi::with_writable(
+                presets.clone(),
+                false,
+                LogitechDpiController {
+                    container: container_id(info),
+                    slot,
+                    lock,
+                    presets,
+                },
+            ),
+        );
+    }
+}
+
+struct LogitechDpiController {
+    container: String,
+    slot: u8,
+    lock: Arc<Mutex<()>>,
+    presets: Vec<u32>,
+}
+
+impl DpiController for LogitechDpiController {
+    fn read_stage(&self) -> Result<Option<u8>, HardwareError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| HardwareError::new(ErrorKind::Unavailable, "receiver lock poisoned"))?;
+        let api = HidApi::new().map_err(HardwareError::transport)?;
+        let interfaces: Vec<DeviceInfo> = api
+            .device_list()
+            .filter(|d| LogitechReceiver.matches(d) && container_id(d) == self.container)
+            .cloned()
+            .collect();
+        let tunnel_info = interfaces
+            .iter()
+            .find(|i| i.usage() == 0x02)
+            .ok_or_else(|| {
+                HardwareError::new(ErrorKind::Unavailable, "tunnel interface missing")
+            })?;
+        let (reader, writer) = open_pair(&api, tunnel_info)?;
+        let mut buffer = [0u8; 256];
+
+        // 1. Try 0x2201 (Adjustable DPI)
+        drain(&reader);
+        send(
+            &writer,
+            &protocol::hidpp_get_feature(self.slot, protocol::HIDPP_FEATURE_ADJUSTABLE_DPI),
+        )?;
+        let idx_2201 = read_matching(&reader, &mut buffer, Duration::from_millis(300), |rep| {
+            protocol::hidpp_feature_index(rep, self.slot)
+        })?;
+        if let Some(idx) = idx_2201 {
+            drain(&reader);
+            send(&writer, &protocol::hidpp_feature_call(self.slot, idx, 2))?;
+            let rep = read_matching(&reader, &mut buffer, Duration::from_millis(300), |rep| {
+                protocol::hidpp_parse_dpi_0x2201(rep, self.slot, idx)
+            })?;
+            if let Some((current_dpi, _default_dpi)) = rep {
+                let stage = self
+                    .presets
+                    .iter()
+                    .position(|&p| p == current_dpi as u32)
+                    .map(|pos| (pos + 1) as u8);
+                return Ok(stage);
+            }
+        }
+
+        // 2. Try 0x2202 (Extended Adjustable DPI)
+        drain(&reader);
+        send(
+            &writer,
+            &protocol::hidpp_get_feature(
+                self.slot,
+                protocol::HIDPP_FEATURE_EXTENDED_ADJUSTABLE_DPI,
+            ),
+        )?;
+        let idx_2202 = read_matching(&reader, &mut buffer, Duration::from_millis(300), |rep| {
+            protocol::hidpp_feature_index(rep, self.slot)
+        })?;
+        if let Some(idx) = idx_2202 {
+            drain(&reader);
+            send(&writer, &protocol::hidpp_feature_call(self.slot, idx, 5))?;
+            let rep = read_matching(&reader, &mut buffer, Duration::from_millis(300), |rep| {
+                protocol::hidpp_parse_dpi_0x2202(rep, self.slot, idx)
+            })?;
+            if let Some(current_dpi) = rep {
+                let stage = self
+                    .presets
+                    .iter()
+                    .position(|&p| p == current_dpi as u32)
+                    .map(|pos| (pos + 1) as u8);
+                return Ok(stage);
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn set_stage(&self, _stage: u8) -> Result<(), HardwareError> {
+        Err(HardwareError::new(
+            ErrorKind::Unsupported,
+            "Logitech DPI write is disabled without verified onboard mode bypass",
+        ))
     }
 }
 

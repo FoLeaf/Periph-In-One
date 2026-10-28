@@ -80,7 +80,6 @@ pub fn restore(saved: &[SavedDevice]) -> Vec<Device> {
         .iter()
         .cloned()
         .map(|saved| {
-            let last_dpi_stage = saved.last_dpi_stage;
             let last_lighting_on = saved.last_lighting_on;
             Device {
                 saved,
@@ -88,7 +87,7 @@ pub fn restore(saved: &[SavedDevice]) -> Vec<Device> {
                 connection: Connection::Disconnected,
                 issue: None,
                 dpi: None,
-                current_dpi_stage: last_dpi_stage,
+                current_dpi_stage: None,
                 dpi_pending: false,
                 lighting: None,
                 current_lighting_on: last_lighting_on,
@@ -684,7 +683,7 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 },
                 issue: failure_for_saved_route(snapshot, &old.saved).cloned(),
                 dpi: if covered { None } else { old.dpi.clone() },
-                current_dpi_stage: old.current_dpi_stage.or(old.saved.last_dpi_stage),
+                current_dpi_stage: if covered { None } else { old.current_dpi_stage },
                 dpi_pending: old.dpi_pending,
                 lighting: if covered { None } else { old.lighting.clone() },
                 current_lighting_on: old.current_lighting_on.or(old.saved.last_lighting_on),
@@ -802,7 +801,6 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 descriptor: descriptor.clone(),
                 ..SavedDevice::default()
             };
-            let last_dpi_stage = saved_dev.last_dpi_stage;
             let last_lighting_on = saved_dev.last_lighting_on;
             devices.push(Device {
                 saved: saved_dev,
@@ -810,7 +808,7 @@ pub fn merge_snapshot(previous: &[Device], snapshot: &Snapshot) -> MergeResult {
                 connection: Connection::Disconnected,
                 issue: None,
                 dpi: None,
-                current_dpi_stage: last_dpi_stage,
+                current_dpi_stage: None,
                 dpi_pending: false,
                 lighting: None,
                 current_lighting_on: last_lighting_on,

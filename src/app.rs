@@ -355,6 +355,31 @@ impl App {
                     dpi_stage: device.current_dpi_stage.unwrap_or(0) as i32,
                     dpi_pending: device.dpi_pending,
                     dpi_available: device.dpi.is_some(),
+                    dpi_writable: device.dpi.as_ref().map(|d| d.can_write()).unwrap_or(false),
+                    dpi_label_1: device
+                        .dpi
+                        .as_ref()
+                        .and_then(|d| d.stages().first().map(|v| v.to_string()))
+                        .unwrap_or_else(|| "400".into())
+                        .into(),
+                    dpi_label_2: device
+                        .dpi
+                        .as_ref()
+                        .and_then(|d| d.stages().get(1).map(|v| v.to_string()))
+                        .unwrap_or_else(|| "800".into())
+                        .into(),
+                    dpi_label_3: device
+                        .dpi
+                        .as_ref()
+                        .and_then(|d| d.stages().get(2).map(|v| v.to_string()))
+                        .unwrap_or_else(|| "1200".into())
+                        .into(),
+                    dpi_label_4: device
+                        .dpi
+                        .as_ref()
+                        .and_then(|d| d.stages().get(3).map(|v| v.to_string()))
+                        .unwrap_or_else(|| "1600".into())
+                        .into(),
                     has_lighting: device.lighting.is_some()
                         || device.saved.last_lighting_on.is_some(),
                     lighting_on: device.current_lighting_on.unwrap_or(false),

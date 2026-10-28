@@ -395,8 +395,8 @@ pub fn merge_report(
             if stage.is_some() {
                 device.current_dpi_stage = *stage;
                 device.saved.last_dpi_stage = *stage;
-            } else if device.current_dpi_stage.is_none() {
-                device.current_dpi_stage = device.saved.last_dpi_stage;
+            } else {
+                device.current_dpi_stage = None;
             }
         }
     }

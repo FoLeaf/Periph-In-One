@@ -2,8 +2,9 @@
 //! 1D57:FA65 FF00:0001). Notifications ride on input report 0x03. Zero writes
 //! on the discovery/battery path.
 
-use crate::{Connection, ErrorKind, HardwareError};
 use crate::{
+    Capabilities, Connection, ErrorKind, HardwareError,
+    dpi::{Dpi, DpiController},
     protocol,
     vendor::{Outcome, TargetCardinality, VendorAdapter},
     windows::{
@@ -12,7 +13,10 @@ use crate::{
     },
 };
 use hidapi::{DeviceInfo, HidApi};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 const VID: u16 = 0x1d57;
 const PID_FA60: u16 = 0xfa60;
@@ -26,7 +30,9 @@ impl InphicMouse {
             return false;
         }
         match info.product_id() {
-            PID_FA60 => (info.usage_page() == 0x000a || info.usage_page() == 0x000b) && info.usage() == 0,
+            PID_FA60 => {
+                (info.usage_page() == 0x000a || info.usage_page() == 0x000b) && info.usage() == 0
+            }
             PID_FA65 => info.usage_page() == 0xff00 && info.usage() == 0x0001,
             _ => false,
         }
@@ -55,6 +61,34 @@ impl VendorAdapter for InphicMouse {
 
     fn discover(&self, api: &HidApi, info: &DeviceInfo) -> Vec<Outcome> {
         vec![self.read(api, info)]
+    }
+
+    fn populate_capabilities(
+        &self,
+        _info: &DeviceInfo,
+        _slot: Option<u8>,
+        _lock: Arc<Mutex<()>>,
+        capabilities: &mut Capabilities,
+    ) {
+        let _ = capabilities.insert(
+            "main",
+            Dpi::with_writable(vec![800, 1600, 2400, 3200], false, InphicDpiController),
+        );
+    }
+}
+
+struct InphicDpiController;
+
+impl DpiController for InphicDpiController {
+    fn read_stage(&self) -> Result<Option<u8>, HardwareError> {
+        Ok(None)
+    }
+
+    fn set_stage(&self, _stage: u8) -> Result<(), HardwareError> {
+        Err(HardwareError::new(
+            ErrorKind::Unsupported,
+            "Inphic DPI writing is disabled without verified configuration backup",
+        ))
     }
 }
 

@@ -1097,7 +1097,10 @@ pub struct InphicBattery {
 pub fn inphic_parse_battery(report: &[u8]) -> Option<InphicBattery> {
     let (tag, subcmd, mode, level) = if report.len() >= 5 && report[0] == 0x03 {
         (report[1], report[2], report[3], report[4])
-    } else if report.len() >= 4 && InphicModel::from_tag(report[0]).is_some() && report[1] == INPHIC_SUBCMD_BATTERY {
+    } else if report.len() >= 4
+        && InphicModel::from_tag(report[0]).is_some()
+        && report[1] == INPHIC_SUBCMD_BATTERY
+    {
         (report[0], report[1], report[2], report[3])
     } else {
         return None;
@@ -1115,7 +1118,10 @@ pub fn inphic_parse_battery(report: &[u8]) -> Option<InphicBattery> {
 pub fn inphic_parse_dpi_stage(report: &[u8]) -> Option<(InphicModel, u8)> {
     let (tag, subcmd, stage) = if report.len() >= 4 && report[0] == 0x03 {
         (report[1], report[2], report[3])
-    } else if report.len() >= 3 && InphicModel::from_tag(report[0]).is_some() && report[1] == INPHIC_SUBCMD_DPI {
+    } else if report.len() >= 3
+        && InphicModel::from_tag(report[0]).is_some()
+        && report[1] == INPHIC_SUBCMD_DPI
+    {
         (report[0], report[1], report[2])
     } else {
         return None;
@@ -1155,4 +1161,3 @@ pub fn inphic_validate_dpi_frame(frame: &[u8]) -> bool {
     let actual = u16::from_le_bytes([frame[50], frame[51]]);
     expected == actual
 }
-

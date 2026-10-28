@@ -23,6 +23,11 @@ export struct DeviceRow {
     dpi-stage: int,
     dpi-pending: bool,
     dpi-available: bool,
+    dpi-writable: bool,
+    dpi-label-1: string,
+    dpi-label-2: string,
+    dpi-label-3: string,
+    dpi-label-4: string,
     has-lighting: bool,
     lighting-on: bool,
     lighting-known: bool,
@@ -143,27 +148,27 @@ component DeviceCard inherits Rectangle {
                 padding: 2px;
                 spacing: 2px;
                 TabsTrigger {
-                    text: "400";
+                    text: root.data.dpi-label-1;
                     active: root.data.dpi-stage == 1;
-                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || !root.data.dpi-writable || root.data.dpi-pending;
                     clicked => { root.set-dpi(1); }
                 }
                 TabsTrigger {
-                    text: "800";
+                    text: root.data.dpi-label-2;
                     active: root.data.dpi-stage == 2;
-                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || !root.data.dpi-writable || root.data.dpi-pending;
                     clicked => { root.set-dpi(2); }
                 }
                 TabsTrigger {
-                    text: "1200";
+                    text: root.data.dpi-label-3;
                     active: root.data.dpi-stage == 3;
-                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || !root.data.dpi-writable || root.data.dpi-pending;
                     clicked => { root.set-dpi(3); }
                 }
                 TabsTrigger {
-                    text: "1600";
+                    text: root.data.dpi-label-4;
                     active: root.data.dpi-stage == 4;
-                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || root.data.dpi-pending;
+                    disabled: !root.data.present || !root.data.fresh || !root.data.dpi-available || !root.data.dpi-writable || root.data.dpi-pending;
                     clicked => { root.set-dpi(4); }
                 }
             }

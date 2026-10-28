@@ -452,4 +452,3 @@ fn hidpp_raw_index_and_dpi_parsing() {
     dpi_2202_rep[5..7].copy_from_slice(&3200u16.to_be_bytes());
     assert_eq!(hidpp_parse_dpi_0x2202(&dpi_2202_rep, 1, 8), Some(3200));
 }
-
